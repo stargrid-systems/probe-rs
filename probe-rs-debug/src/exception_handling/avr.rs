@@ -18,6 +18,14 @@
 //! at the next free byte, so the live stack starts at `SP + 1`. Reading two
 //! bytes big endian and doubling gives a candidate byte address in flash.
 //!
+//! The stack pointer arrives here as a probe-rs address, which for the AVR data
+//! space means the chip value plus
+//! [`DATA_SPACE_OFFSET`](probe_rs::architecture::avr::communication_interface::DATA_SPACE_OFFSET).
+//! The AVR core module adds that offset when it reads the register. So the
+//! addresses this module computes go straight to [`MemoryInterface`] and reach
+//! the stack, and the caller stack pointer it hands back stays in the same
+//! space.
+//!
 //! A candidate is accepted only when both of these hold.
 //!
 //! 1. The debug information has a subprogram covering the call instruction.
@@ -59,7 +67,6 @@
 use std::error::Error;
 use std::ops::ControlFlow;
 
-use probe_rs::architecture::avr::communication_interface::DATA_SPACE_OFFSET;
 use probe_rs::{InstructionSet, MemoryInterface, RegisterRole};
 
 use crate::{
@@ -119,7 +126,7 @@ impl ExceptionInterface for AvrExceptionHandler {
         };
 
         tracing::debug!(
-            "UNWIND: AVR stack scan found a return address for a caller at {:#010x}, SP {:#06x}",
+            "UNWIND: AVR stack scan found a return address for a caller at {:#010x}, SP {:#010x}",
             caller.program_counter,
             caller.stack_pointer
         );
@@ -156,7 +163,7 @@ fn scan_for_caller(
     debug_info: &DebugInfo,
     stack_pointer: u64,
 ) -> Option<ScannedCaller> {
-    let stack = read_stack(memory, data_space_address(stack_pointer) + 1);
+    let stack = read_stack(memory, stack_pointer + 1);
 
     for offset in 0..stack.len().saturating_sub(1) {
         let word_address = u64::from(u16::from_be_bytes([stack[offset], stack[offset + 1]]));
@@ -244,33 +251,23 @@ fn preceded_by_call(memory: &mut dyn MemoryInterface, return_address: u64) -> bo
     read_opcode(memory, return_address - 4).is_some_and(|long| long & CALL_MASK == CALL_OPCODE)
 }
 
-/// Maps a raw AVR data address into the address space [`MemoryInterface`] uses.
-///
-/// The core reports the stack pointer as the plain 16-bit value the chip holds,
-/// while probe-rs places the data space at [`DATA_SPACE_OFFSET`] to keep it
-/// apart from flash. An address that already carries the offset is left alone,
-/// so applying this twice is harmless.
-fn data_space_address(address: u64) -> u64 {
-    if address < DATA_SPACE_OFFSET {
-        address + DATA_SPACE_OFFSET
-    } else {
-        address
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::path::PathBuf;
 
+    use probe_rs::architecture::avr::communication_interface::DATA_SPACE_OFFSET;
     use probe_rs::architecture::avr::registers::AVR_CORE_REGISTERS;
     use probe_rs::{MemoryInterface, RegisterRole, RegisterValue, test::MockMemory};
 
-    use super::{AvrExceptionHandler, DATA_SPACE_OFFSET, data_space_address, preceded_by_call};
+    use super::{AvrExceptionHandler, preceded_by_call};
     use crate::exception_handling::ExceptionInterface;
     use crate::{DebugInfo, DebugRegisters};
 
     /// Where the stack pointer stood when the real target was halted in `level4`.
-    const HALTED_STACK_POINTER: u64 = 0x7F00;
+    ///
+    /// The chip held `0x7F00`. This is the probe-rs address for it, which is what
+    /// the AVR core reports.
+    const HALTED_STACK_POINTER: u64 = DATA_SPACE_OFFSET + 0x7F00;
 
     /// The word program counter of the halt, inside `level4`.
     const HALTED_PROGRAM_COUNTER: u64 = 0x248;
@@ -309,10 +306,7 @@ mod test {
         for &(offset, word_address) in MEASURED_STACK {
             stack[offset..offset + 2].copy_from_slice(&word_address.to_be_bytes());
         }
-        memory.add_range(
-            data_space_address(HALTED_STACK_POINTER) + 1,
-            [stack, vec![0u8; 128]].concat(),
-        );
+        memory.add_range(HALTED_STACK_POINTER + 1, [stack, vec![0u8; 128]].concat());
 
         memory
     }
@@ -434,10 +428,7 @@ mod test {
         memory.add_range(0, std::fs::read(test_file("avr-call-chain.bin")).unwrap());
         // A counting pattern, which is what uninitialised or data-holding stack
         // tends to look like.
-        memory.add_range(
-            data_space_address(HALTED_STACK_POINTER) + 1,
-            (0..=255u8).collect(),
-        );
+        memory.add_range(HALTED_STACK_POINTER + 1, (0..=255u8).collect());
 
         let mut registers = halted_registers();
         assert!(
@@ -464,7 +455,7 @@ mod test {
 
         let mut memory = BoundedMemory {
             inner: call_chain_memory(),
-            end: data_space_address(HALTED_STACK_POINTER) + 1 + 16,
+            end: HALTED_STACK_POINTER + 1 + 16,
         };
 
         let mut registers = halted_registers();
@@ -539,13 +530,34 @@ mod test {
         }
     }
 
+    /// The caller stack pointer has to come back in the same address space it
+    /// went in, or the next frame would be scanned out of flash.
     #[test]
-    fn data_addresses_are_mapped_once() {
-        assert_eq!(data_space_address(0x7F00), DATA_SPACE_OFFSET + 0x7F00);
-        assert_eq!(
-            data_space_address(DATA_SPACE_OFFSET + 0x7F00),
-            DATA_SPACE_OFFSET + 0x7F00
+    fn the_recovered_stack_pointer_stays_in_the_data_space() {
+        let debug_info = call_chain_debug_info();
+        let mut memory = call_chain_memory();
+        let mut registers = halted_registers();
+
+        assert!(
+            AvrExceptionHandler
+                .unwind_without_debuginfo(
+                    &mut registers,
+                    HALTED_PROGRAM_COUNTER,
+                    &[],
+                    None,
+                    &debug_info,
+                    &mut memory,
+                )
+                .is_continue()
         );
+
+        let stack_pointer = registers
+            .get_register_value_by_role(&RegisterRole::StackPointer)
+            .unwrap();
+
+        // `ret` pops the two byte return address that sat at offset 19.
+        assert_eq!(stack_pointer, HALTED_STACK_POINTER + 19 + 2);
+        assert!(stack_pointer >= DATA_SPACE_OFFSET);
     }
 
     /// Guards the assumption that the stack is read, and not the flash that
@@ -555,10 +567,7 @@ mod test {
         let mut memory = call_chain_memory();
         let mut stack = [0u8; 2];
         memory
-            .read_8(
-                data_space_address(HALTED_STACK_POINTER) + 1 + 19,
-                &mut stack,
-            )
+            .read_8(HALTED_STACK_POINTER + 1 + 19, &mut stack)
             .unwrap();
         assert_eq!(u16::from_be_bytes(stack), 0x011C);
     }

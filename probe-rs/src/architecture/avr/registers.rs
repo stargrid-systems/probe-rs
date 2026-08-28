@@ -6,9 +6,13 @@
 //!
 //! The stack pointer needs a note. avr-gcc splits it into `SPL` at 32 and `SPH`
 //! at 33, while probe-rs wants one register per value, so [`SP`] is a single
-//! 16-bit register carrying number 32. Every function in a Rust AVR binary uses
+//! register carrying number 32. Every function in a Rust AVR binary uses
 //! `DW_OP_regx: 32` as its `DW_AT_frame_base`, so this is the number that has
 //! to resolve for local variables to be readable.
+//!
+//! [`SP`] and [`FP`] both hold data space addresses in the probe-rs convention,
+//! which the core module translates to and from the raw chip values. That is why
+//! they are wider than the 16 bits the chip holds.
 
 use std::sync::LazyLock;
 
@@ -46,23 +50,29 @@ macro_rules! gpr {
 ///
 /// DWARF numbers the two halves separately, as 28 and 29, so this combined
 /// register carries no number of its own.
+///
+/// It is 32 bits wide for the same reason as [`SP`].
 pub const FP: CoreRegister = CoreRegister {
     roles: &[RegisterRole::Core("Y"), RegisterRole::FramePointer],
     id: RegisterId(35),
     dwarf_id: None,
-    data_type: RegisterDataType::UnsignedInteger(16),
+    data_type: RegisterDataType::UnsignedInteger(32),
     unwind_rule: UnwindRule::Preserve,
 };
 
-/// The stack pointer.
+/// The stack pointer, as a probe-rs data space address.
 ///
 /// DWARF number 32, which avr-gcc names `SPL`. See the module documentation for
 /// why the high half does not get a register of its own.
+///
+/// The chip holds 16 bits, but the value probe-rs reports carries the data space
+/// offset so that it names the stack rather than flash. That needs 24 bits, and
+/// the next size a register value comes in is 32.
 pub const SP: CoreRegister = CoreRegister {
     roles: &[RegisterRole::Core("SP"), RegisterRole::StackPointer],
     id: RegisterId(32),
     dwarf_id: Some(32),
-    data_type: RegisterDataType::UnsignedInteger(16),
+    data_type: RegisterDataType::UnsignedInteger(32),
     unwind_rule: UnwindRule::SpecialRule,
 };
 
@@ -154,11 +164,19 @@ mod tests {
     #[test]
     fn the_stack_pointer_is_dwarf_32() {
         assert_eq!(SP.dwarf_id, Some(32));
-        assert_eq!(SP.size_in_bits(), 16);
     }
 
-    /// DWARF 28 means the 8-bit `r28`, not the 16-bit `Y` pair, so the pair
-    /// must not claim the number.
+    /// Both pointer registers report probe-rs data space addresses, which do
+    /// not fit in the 16 bits the chip holds. A narrower register would make
+    /// the debug adapter reject every value a user could write back.
+    #[test]
+    fn the_pointer_registers_are_wide_enough_for_a_data_space_address() {
+        assert_eq!(SP.size_in_bits(), 32);
+        assert_eq!(FP.size_in_bits(), 32);
+    }
+
+    /// DWARF 28 means the 8-bit `r28`, not the `Y` pair, so the pair must not
+    /// claim the number.
     #[test]
     fn only_one_register_claims_each_dwarf_number() {
         let mut numbers: Vec<u16> = AVR_CORE_REGISTERS

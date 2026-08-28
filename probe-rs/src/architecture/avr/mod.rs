@@ -11,6 +11,12 @@
 //! information count bytes. [`Avr`] doubles what it reads and halves what it
 //! writes, so nothing above it has to know.
 //!
+//! The stack pointer and the `Y` frame pointer hold chip data addresses, which
+//! are the same numbers probe-rs uses for flash. [`Avr`] adds the data space
+//! offset when it reads them and takes it off again when it writes them, so a
+//! caller that follows either one reaches the stack. The program counter is a
+//! flash address and gets no offset.
+//!
 //! Run control goes through the tool's own scripts rather than through writes
 //! to the debug block. Both routes reach the same hardware, and the scripts are
 //! the ones that have been proven on a part.
@@ -28,7 +34,9 @@ use crate::{
     MemoryInterface,
 };
 
-use self::communication_interface::{AvrCommunicationInterface, HW_BREAKPOINT_UNITS};
+use self::communication_interface::{
+    AvrCommunicationInterface, DATA_SPACE_OFFSET, HW_BREAKPOINT_UNITS, to_chip_data_address,
+};
 use self::ocd::OcdVersion;
 use self::registers::{AVR_CORE_REGISTERS, FP, PC, SP, SREG};
 use self::sequences::AvrDebugSequence;
@@ -242,6 +250,31 @@ impl<'probe> Avr<'probe> {
     fn byte_to_word_address(byte_address: u64) -> u32 {
         (byte_address / 2) as u32
     }
+
+    /// Turns a raw chip data address into the address probe-rs uses for it.
+    ///
+    /// A pointer register that keeps the raw value names the same number in
+    /// flash, because that is where probe-rs puts flash. Reading through it then
+    /// returns program bytes with no error at all, so this translation is what
+    /// keeps stack locals readable.
+    fn to_probe_rs_data_address(chip_address: u16) -> u32 {
+        (DATA_SPACE_OFFSET + u64::from(chip_address)) as u32
+    }
+
+    /// Turns a probe-rs data space address back into the raw chip address.
+    ///
+    /// The inverse of [`Avr::to_probe_rs_data_address`]. An address that is not
+    /// in the data space, or that no 16-bit pointer register can hold, is an
+    /// error rather than a silent truncation.
+    fn to_chip_pointer(address: u32) -> Result<u16, Error> {
+        let chip = to_chip_data_address(u64::from(address))?;
+
+        u16::try_from(chip).map_err(|_| {
+            Error::Register(format!(
+                "{address:#010x} is outside the AVR data space and cannot be a pointer register"
+            ))
+        })
+    }
 }
 
 impl CoreMemoryInterface for Avr<'_> {
@@ -338,13 +371,13 @@ impl CoreInterface for Avr<'_> {
                 let word_address = self.interface.program_counter()?;
                 Self::word_to_byte_address(word_address) as u32
             }
-            id if id == SP.id => u32::from(self.read_ocd_16(ocd::SP)?),
+            id if id == SP.id => Self::to_probe_rs_data_address(self.read_ocd_16(ocd::SP)?),
             id if id == SREG.id => u32::from(self.read_ocd_8(ocd::SREG)?),
             id if id == FP.id => {
                 // The Y pair is r28 and r29 of the register file.
                 let low = self.read_register_file(28)?;
                 let high = self.read_register_file(29)?;
-                u32::from(u16::from_le_bytes([low, high]))
+                Self::to_probe_rs_data_address(u16::from_le_bytes([low, high]))
             }
             RegisterId(index) if usize::from(index) < ocd::REGISTER_FILE_LEN => {
                 u32::from(self.read_register_file(u64::from(index))?)
@@ -367,10 +400,10 @@ impl CoreInterface for Avr<'_> {
                 let word_address = Self::byte_to_word_address(u64::from(value));
                 self.interface.set_program_counter(word_address)?;
             }
-            id if id == SP.id => self.write_ocd_16(ocd::SP, value as u16)?,
+            id if id == SP.id => self.write_ocd_16(ocd::SP, Self::to_chip_pointer(value)?)?,
             id if id == SREG.id => self.write_ocd_8(ocd::SREG, value as u8)?,
             id if id == FP.id => {
-                let [low, high] = (value as u16).to_le_bytes();
+                let [low, high] = Self::to_chip_pointer(value)?.to_le_bytes();
                 self.write_register_file(28, low)?;
                 self.write_register_file(29, high)?;
             }
@@ -519,6 +552,52 @@ mod tests {
     #[test]
     fn odd_byte_addresses_round_down_to_an_instruction() {
         assert_eq!(Avr::byte_to_word_address(0x189), 0x00c4);
+    }
+
+    /// A pointer register goes out as a probe-rs address and comes back as the
+    /// raw chip value, so writing back what was read leaves the chip alone.
+    #[test]
+    fn a_pointer_register_survives_a_read_and_a_write_back() {
+        for raw in [0u16, 0x4000, 0x3FFF, 0x7F00, 0xFFFF] {
+            let reported = Avr::to_probe_rs_data_address(raw);
+
+            assert_eq!(Avr::to_chip_pointer(reported).unwrap(), raw);
+        }
+    }
+
+    /// The bug this guards against is silent. A stack pointer left in the raw
+    /// chip form names flash, so locals get read out of the program image and
+    /// nothing reports an error.
+    #[test]
+    fn a_stack_pointer_lands_in_the_data_space_and_a_program_counter_in_flash() {
+        use self::communication_interface::AddressSpace;
+
+        // A full stack on an AVR128DA64, which has 16 KiB of SRAM at 0x804000.
+        assert_eq!(Avr::to_probe_rs_data_address(0x3FFF), 0x80_3FFF);
+        assert_eq!(
+            AddressSpace::of(u64::from(Avr::to_probe_rs_data_address(0x3FFF))),
+            AddressSpace::Data
+        );
+        assert_eq!(
+            AddressSpace::of(u64::from(Avr::to_probe_rs_data_address(0x0000))),
+            AddressSpace::Data
+        );
+
+        // The program counter is a flash address and takes no offset.
+        assert_eq!(
+            AddressSpace::of(Avr::word_to_byte_address(0xFFFF)),
+            AddressSpace::Flash
+        );
+    }
+
+    /// A pointer register is 16 bits on the chip, so a probe-rs address that no
+    /// AVR data space reaches has to be refused rather than truncated.
+    #[test]
+    fn a_pointer_outside_the_data_space_is_refused() {
+        // A flash address, which is what an untranslated value looks like.
+        assert!(Avr::to_chip_pointer(0x3FFF).is_err());
+        // Past the end of the 16-bit data space.
+        assert!(Avr::to_chip_pointer(0x81_0000).is_err());
     }
 
     /// Every value here was read out of `CAUSE` after triggering the cause on a
