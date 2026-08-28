@@ -357,6 +357,39 @@ impl AvrFamily {
             None
         }
     }
+
+    /// The address the flash scripts give to the first byte of flash.
+    ///
+    /// The flash scripts do not address flash from zero. They place it above
+    /// the data space, so the caller has to add this base to a flash address
+    /// before handing it to `ReadProgmem` or `WriteProgmem`.
+    ///
+    /// The value for [`AvrFamily::Dx`] is `0x800000` and is verified on an
+    /// AVR128DA64.
+    ///
+    /// The value for [`AvrFamily::Tiny0`] is **not verified on hardware**. The
+    /// tinyAVR 0-series and 1-series map their whole flash into the data space
+    /// at `0x8000`, which is why the mapped window covers all 4 KiB on an
+    /// ATtiny406 but only 32 KiB of 128 KiB on a Dx part. A base of `0x8000` is
+    /// the plausible consequence, but nobody has read a known byte both ways
+    /// and compared. Treat it as a guess until somebody has.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use probe_rs::probe::pickit::AvrFamily;
+    ///
+    /// assert_eq!(AvrFamily::Dx.flash_base(), 0x80_0000);
+    /// assert_eq!(AvrFamily::Tiny0.flash_base(), 0x8000);
+    /// ```
+    pub fn flash_base(self) -> u64 {
+        match self {
+            // Verified on hardware on an AVR128DA64.
+            AvrFamily::Dx => 0x0080_0000,
+            // Unverified. See the doc comment.
+            AvrFamily::Tiny0 => 0x0000_8000,
+        }
+    }
 }
 
 impl ScriptSource for AvrFamily {
@@ -457,6 +490,13 @@ mod tests {
         assert_eq!(AvrFamily::for_device("ATtiny406"), Some(AvrFamily::Tiny0));
         assert_eq!(AvrFamily::for_device("attiny1614"), Some(AvrFamily::Tiny0));
         assert_eq!(AvrFamily::for_device("nRF52840"), None);
+    }
+
+    /// The two families place flash somewhere different, so pin each one.
+    #[test]
+    fn each_family_pins_its_own_flash_base() {
+        assert_eq!(AvrFamily::Dx.flash_base(), 0x0080_0000);
+        assert_eq!(AvrFamily::Tiny0.flash_base(), 0x0000_8000);
     }
 
     #[test]

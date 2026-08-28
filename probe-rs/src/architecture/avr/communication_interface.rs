@@ -15,14 +15,20 @@
 //! `0x804000`.
 //!
 //! The PICkit scripts use the inverse. The data space is at its native chip
-//! address, so the same SRAM is at `0x4000`, and flash carries the
-//! `0x800000` offset instead.
+//! address, so the same SRAM is at `0x4000`, and flash carries a base offset
+//! instead.
 //!
-//! So both directions apply the same constant, and both apply it the other way
-//! round from what the name suggests. [`to_chip_data_address`] subtracts it and
-//! [`to_tool_flash_address`] adds it.
+//! So both directions move an address, and both move it the other way round
+//! from what the name suggests. [`to_chip_data_address`] subtracts
+//! [`DATA_SPACE_OFFSET`] and [`to_tool_flash_address`] adds the flash base of
+//! the part family.
+//!
+//! The data space offset is the same everywhere. The flash base is not, which
+//! is why it comes from [`AvrFamily::flash_base`] rather than from a constant
+//! here.
 
 use std::fmt;
+use std::sync::Once;
 
 use crate::probe::DebugProbeError;
 use crate::probe::pickit::{AvrFamily, Params, Pickit, ScriptName, SessionState};
@@ -67,27 +73,51 @@ pub fn to_chip_data_address(address: u64) -> Result<u32, AvrError> {
     Ok(chip as u32)
 }
 
+/// Warns once that the tiny flash base has never been checked on a part.
+static TINY_FLASH_BASE_UNVERIFIED: Once = Once::new();
+
 /// Converts a probe-rs flash address to the address the tool scripts use.
 ///
 /// probe-rs places flash at zero and the flash scripts place it at
-/// [`DATA_SPACE_OFFSET`], so this adds the offset.
+/// [`AvrFamily::flash_base`], so this adds that base.
+///
+/// The base for [`AvrFamily::Tiny0`] has never been checked against a part, so
+/// the first call for a tiny target logs a warning.
 ///
 /// # Examples
 ///
 /// ```
 /// use probe_rs::architecture::avr::communication_interface::to_tool_flash_address;
+/// use probe_rs::probe::pickit::AvrFamily;
 ///
-/// assert_eq!(to_tool_flash_address(0).unwrap(), 0x80_0000);
-/// assert_eq!(to_tool_flash_address(0x1_0000).unwrap(), 0x81_0000);
-/// // An address at or above the offset is in the data space, not in flash.
-/// assert!(to_tool_flash_address(0x80_4000).is_err());
+/// assert_eq!(to_tool_flash_address(AvrFamily::Dx, 0).unwrap(), 0x80_0000);
+/// assert_eq!(to_tool_flash_address(AvrFamily::Dx, 0x1_0000).unwrap(), 0x81_0000);
+/// assert_eq!(to_tool_flash_address(AvrFamily::Tiny0, 0).unwrap(), 0x8000);
+/// // An address at or above the data space offset is not in flash.
+/// assert!(to_tool_flash_address(AvrFamily::Dx, 0x80_4000).is_err());
 /// ```
-pub fn to_tool_flash_address(address: u64) -> Result<u32, AvrError> {
+pub fn to_tool_flash_address(family: AvrFamily, address: u64) -> Result<u32, AvrError> {
     if address >= DATA_SPACE_OFFSET {
         return Err(AvrError::NotInFlash(address));
     }
 
-    Ok((address + DATA_SPACE_OFFSET) as u32)
+    if family == AvrFamily::Tiny0 {
+        TINY_FLASH_BASE_UNVERIFIED.call_once(|| {
+            tracing::warn!(
+                "The flash base offset for tinyAVR 0/1-series parts is a guess. \
+                 It has never been read back from a part, so flash access may \
+                 land in the wrong place."
+            );
+        });
+    }
+
+    let tool = address + family.flash_base();
+
+    if tool > MAX_TOOL_ADDRESS {
+        return Err(AvrError::NotInFlash(address));
+    }
+
+    Ok(tool as u32)
 }
 
 /// An error that happened while talking to an AVR target.
@@ -345,11 +375,21 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// linear across the whole device, so this also reaches the part of flash
     /// that is not mapped into the data space.
     pub fn read_flash(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
-        self.read(
-            ScriptName::ReadProgmem,
-            to_tool_flash_address(address)?,
-            data,
-        )
+        let tool_address = to_tool_flash_address(self.state.family, address)?;
+
+        self.read(ScriptName::ReadProgmem, tool_address, data)
+    }
+
+    /// Writes flash.
+    ///
+    /// The script erases and programs whole pages, and the page size is baked
+    /// into the bytecode rather than passed in. A write that does not cover a
+    /// whole page leaves the rest of that page in an undefined state, so the
+    /// caller has to align its writes itself.
+    pub fn write_flash(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
+        let tool_address = to_tool_flash_address(self.state.family, address)?;
+
+        self.write(ScriptName::WriteProgmem, tool_address, data)
     }
 
     /// Closes the session and leaves the tool ready for a new one.
@@ -435,23 +475,41 @@ mod tests {
         }
     }
 
+    /// The Dx flash base is the one that was read back from a part.
     #[test]
-    fn flash_addresses_gain_the_offset() {
-        // Flash is at zero for probe-rs and at the offset for the tool.
-        assert_eq!(to_tool_flash_address(0x0).unwrap(), 0x80_0000);
-        assert_eq!(to_tool_flash_address(0x200).unwrap(), 0x80_0200);
+    fn dx_flash_addresses_gain_the_verified_base() {
+        let dx = AvrFamily::Dx;
+
+        // Flash is at zero for probe-rs and at the base for the tool.
+        assert_eq!(to_tool_flash_address(dx, 0x0).unwrap(), 0x80_0000);
+        assert_eq!(to_tool_flash_address(dx, 0x200).unwrap(), 0x80_0200);
         // Above the 32 KiB mapped window, where addressing stays linear.
-        assert_eq!(to_tool_flash_address(0x1_0000).unwrap(), 0x81_0000);
-        assert_eq!(to_tool_flash_address(0x1_F000).unwrap(), 0x81_F000);
+        assert_eq!(to_tool_flash_address(dx, 0x1_0000).unwrap(), 0x81_0000);
+        assert_eq!(to_tool_flash_address(dx, 0x1_F000).unwrap(), 0x81_F000);
         // The last byte of a 128 KiB part.
-        assert_eq!(to_tool_flash_address(0x1_FFFF).unwrap(), 0x81_FFFF);
+        assert_eq!(to_tool_flash_address(dx, 0x1_FFFF).unwrap(), 0x81_FFFF);
+    }
+
+    /// The tiny flash base is a guess, so pin it separately from the Dx one.
+    /// If a part ever proves it wrong, only this test and
+    /// [`AvrFamily::flash_base`] change.
+    #[test]
+    fn tiny_flash_addresses_gain_the_unverified_base() {
+        let tiny = AvrFamily::Tiny0;
+
+        assert_eq!(to_tool_flash_address(tiny, 0x0).unwrap(), 0x8000);
+        assert_eq!(to_tool_flash_address(tiny, 0x40).unwrap(), 0x8040);
+        // The last byte of the 4 KiB flash of an ATtiny406.
+        assert_eq!(to_tool_flash_address(tiny, 0x0FFF).unwrap(), 0x8FFF);
     }
 
     /// The two spaces meet at the offset, and neither may cross into the other.
     #[test]
     fn the_two_spaces_do_not_overlap() {
-        assert!(to_tool_flash_address(DATA_SPACE_OFFSET - 1).is_ok());
-        assert!(to_tool_flash_address(DATA_SPACE_OFFSET).is_err());
+        for family in [AvrFamily::Dx, AvrFamily::Tiny0] {
+            assert!(to_tool_flash_address(family, DATA_SPACE_OFFSET - 1).is_ok());
+            assert!(to_tool_flash_address(family, DATA_SPACE_OFFSET).is_err());
+        }
 
         assert!(to_chip_data_address(DATA_SPACE_OFFSET - 1).is_err());
         assert_eq!(to_chip_data_address(DATA_SPACE_OFFSET).unwrap(), 0);
@@ -461,8 +519,10 @@ mod tests {
     /// the identity. This pins the direction of each function.
     #[test]
     fn the_two_translations_move_in_opposite_directions() {
-        let flash = to_tool_flash_address(0x1234).unwrap();
-        assert!(u64::from(flash) > 0x1234);
+        for family in [AvrFamily::Dx, AvrFamily::Tiny0] {
+            let flash = to_tool_flash_address(family, 0x1234).unwrap();
+            assert!(u64::from(flash) > 0x1234);
+        }
 
         let data = to_chip_data_address(0x80_1234).unwrap();
         assert!(u64::from(data) < 0x80_1234);
