@@ -46,7 +46,7 @@ impl RuntimeTarget {
             primary.registers,
             primary.core_type,
             primary.instruction_set,
-        );
+        )?;
         Ok(())
     }
 

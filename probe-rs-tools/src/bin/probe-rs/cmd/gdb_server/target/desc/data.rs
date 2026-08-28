@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use itertools::Itertools;
 use probe_rs::{CoreRegister, CoreRegisters, CoreType, InstructionSet, RegisterId, architecture};
 use std::fmt::Write;
@@ -246,7 +247,7 @@ pub fn build_target_description(
     regs: &CoreRegisters,
     core_type: CoreType,
     isa: InstructionSet,
-) -> TargetDescription {
+) -> Result<TargetDescription> {
     let mut desc = TargetDescription::new(core_type, isa);
 
     // Build the main register group
@@ -262,10 +263,10 @@ pub fn build_target_description(
         },
         CoreType::Riscv | CoreType::Riscv64 => build_riscv_registers(&mut desc, regs),
         CoreType::Xtensa => build_xtensa_registers(&mut desc, regs),
-        CoreType::Avr => panic!("AVR is not supported by the GDB server yet"),
+        CoreType::Avr => return Err(anyhow!("The GDB server does not support AVR yet")),
     };
 
-    desc
+    Ok(desc)
 }
 
 fn build_riscv_registers(desc: &mut TargetDescription, regs: &CoreRegisters) {
