@@ -4,7 +4,8 @@ use std::ops::Range;
 
 use probe_rs_target::{MemoryRange, NvmRegion, PageInfo};
 
-use super::{FlashAlgorithm, FlashError};
+use super::FlashError;
+use crate::flashing::nvm_driver::NvmGeometry;
 
 /// The description of a page in flash.
 #[derive(Clone, PartialEq, Eq)]
@@ -269,12 +270,12 @@ impl FlashBuilder {
     pub(super) fn build_sectors_and_pages(
         &self,
         region: &NvmRegion,
-        flash_algorithm: &FlashAlgorithm,
+        geometry: &dyn NvmGeometry,
         include_empty_pages: bool,
     ) -> Result<FlashLayout, FlashError> {
         let mut layout = FlashLayout::default();
 
-        for info in flash_algorithm.iter_sectors() {
+        for info in geometry.sectors() {
             let range = info.address_range();
 
             // Ignore the sector if it's outside the NvmRegion.
@@ -282,7 +283,7 @@ impl FlashBuilder {
                 continue;
             }
 
-            let page = flash_algorithm.page_info(info.base_address).unwrap();
+            let page = geometry.page_info(info.base_address).unwrap();
             let page_range = page.address_range();
             let sector_has_data = self.has_data_in_range(&range);
             let page_has_data = self.has_data_in_range(&page_range);
@@ -298,7 +299,7 @@ impl FlashBuilder {
             })
         }
 
-        for info in flash_algorithm.iter_pages() {
+        for info in geometry.pages() {
             let range = info.address_range();
 
             // Ignore the page if it's outside the NvmRegion.
@@ -306,7 +307,7 @@ impl FlashBuilder {
                 continue;
             }
 
-            let sector = flash_algorithm.sector_info(info.base_address).unwrap();
+            let sector = geometry.sector_info(info.base_address).unwrap();
             let sector_range = sector.address_range();
             let sector_has_data = self.has_data_in_range(&sector_range);
             let page_has_data = self.has_data_in_range(&range);
@@ -316,8 +317,7 @@ impl FlashBuilder {
                 continue;
             }
 
-            let mut page =
-                FlashPage::new(&info, flash_algorithm.flash_properties.erased_byte_value);
+            let mut page = FlashPage::new(&info, geometry.erased_byte_value());
 
             let mut fill_start_addr = info.base_address;
 
@@ -367,6 +367,7 @@ mod tests {
     use probe_rs_target::{FlashProperties, MemoryAccess, SectorDescription};
 
     use super::*;
+    use crate::flashing::FlashAlgorithm;
 
     fn assemble_demo_flash1() -> (NvmRegion, FlashAlgorithm) {
         let sd = SectorDescription {

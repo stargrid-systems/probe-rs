@@ -13,6 +13,8 @@ use yaml_serde::Value;
 use super::builder::FlashBuilder;
 use super::{DownloadOptions, FileDownloadError, FlashError, Flasher};
 use crate::Target;
+use crate::flashing::nvm_driver::{self, NvmDriver};
+use crate::flashing::plan::FlashPlan;
 use crate::flashing::progress::ProgressOperation;
 use crate::flashing::{FlashLayout, FlashProgress};
 use crate::memory::MemoryInterface;
@@ -631,27 +633,22 @@ impl FlashLoader {
         session: &mut Session,
         progress: &mut FlashProgress<'_>,
     ) -> Result<(), FlashError> {
-        let mut algos = self.prepare_plan(session, false, &[])?;
+        let mut plans = self.prepare_plan(session, false, &[])?;
 
-        for flasher in algos.iter_mut() {
+        for plan in plans.iter_mut() {
+            let encoding = plan.driver.transfer_encoding();
             let mut program_size = 0;
-            for region in flasher.regions.iter_mut() {
-                program_size += region
-                    .data
-                    .encoder(flasher.flash_algorithm.transfer_encoding, true)
-                    .program_size();
+            for region in plan.regions.iter_mut() {
+                program_size += region.data.encoder(encoding, true).program_size();
             }
             progress.add_progress_bar(ProgressOperation::Verify, Some(program_size));
         }
 
-        // Iterate all flash algorithms we need to use and do the flashing.
-        for mut flasher in algos {
-            tracing::debug!(
-                "Verifying ranges for algo: {}",
-                flasher.flash_algorithm.name
-            );
+        // Iterate all drivers we need to use and do the verification.
+        for mut plan in plans {
+            tracing::debug!("Verifying ranges for driver: {}", plan.driver.name());
 
-            if !flasher.verify(session, progress, true)? {
+            if !plan.verify(session, progress, true)? {
                 return Err(FlashError::Verify);
             }
         }
@@ -670,7 +667,7 @@ impl FlashLoader {
         mut options: DownloadOptions,
     ) -> Result<(), FlashError> {
         tracing::debug!("Committing FlashLoader!");
-        let mut algos = self.prepare_plan(
+        let mut plans = self.prepare_plan(
             session,
             options.keep_unwritten_bytes,
             &options.preferred_algos,
@@ -686,23 +683,23 @@ impl FlashLoader {
             return Ok(());
         }
 
-        self.initialize(&mut algos, session, &mut options)?;
+        self.initialize(&mut plans, session, &mut options)?;
 
         let mut do_chip_erase = options.do_chip_erase;
         let mut did_chip_erase = false;
 
-        // Iterate all flash algorithms we need to use and do the flashing.
-        for mut flasher in algos {
-            tracing::debug!("Flashing ranges for algo: {}", flasher.flash_algorithm.name);
+        // Iterate all drivers we need to use and do the flashing.
+        for mut plan in plans {
+            tracing::debug!("Flashing ranges for driver: {}", plan.driver.name());
 
             if do_chip_erase {
                 tracing::debug!("    Doing chip erase...");
-                flasher.run_erase_all(session, &mut options.progress)?;
+                plan.erase_all(session, &mut options.progress)?;
                 do_chip_erase = false;
                 did_chip_erase = true;
             }
 
-            let mut do_use_double_buffering = flasher.double_buffering_supported();
+            let mut do_use_double_buffering = plan.driver.supports_double_buffering();
             if do_use_double_buffering && options.disable_double_buffering {
                 tracing::info!(
                     "Disabled double-buffering support for loader via passed option, though target supports it."
@@ -711,7 +708,7 @@ impl FlashLoader {
             }
 
             // Program the data.
-            flasher.program(
+            plan.program(
                 session,
                 &mut options.progress,
                 options.keep_unwritten_bytes,
@@ -870,7 +867,7 @@ impl FlashLoader {
         session: &mut Session,
         restore_unwritten_bytes: bool,
         opt_preferred_algos: &[String],
-    ) -> Result<Vec<Flasher>, FlashError> {
+    ) -> Result<Vec<FlashPlan>, FlashError> {
         tracing::debug!("Contents of builder:");
         for (&address, data) in &self.builder.data {
             tracing::debug!(
@@ -900,7 +897,7 @@ impl FlashLoader {
             tracing::warn!("Memory map of flash loader does not match memory map of target!");
         }
 
-        let mut algos = Vec::<Flasher>::new();
+        let mut plans = Vec::<FlashPlan>::new();
 
         // Commit NVM first
 
@@ -938,47 +935,60 @@ impl FlashLoader {
                 return Err(FlashError::NoNvmCoreAccess(region));
             };
 
-            let target = session.target();
-            let core = target.core_index_by_name(core_name).unwrap();
-            let algo = Self::get_flash_algorithm_for_region(
-                &region,
-                target,
-                core_name,
-                opt_preferred_algos,
-            )?;
+            let core = session.target().core_index_by_name(core_name).unwrap();
+
+            // A target whose probe or debug sequence programs flash directly supplies
+            // its own driver. Only a target without one needs a flash algorithm, so only
+            // then is a missing algorithm an error.
+            let driver = match nvm_driver::driver_for_region(session, &region, core) {
+                Some(driver) => driver,
+                None => {
+                    let target = session.target();
+                    let algo = Self::get_flash_algorithm_for_region(
+                        &region,
+                        target,
+                        core_name,
+                        opt_preferred_algos,
+                    )?;
+
+                    let mut flasher = Flasher::new(target, core, algo)?;
+                    flasher.read_rtt_output(self.read_flasher_rtt);
+
+                    Box::new(flasher) as Box<dyn NvmDriver>
+                }
+            };
 
             // We don't usually have more than a handful of regions, linear search should be fine.
-            tracing::debug!("     -- using algorithm: {}", algo.name);
-            if let Some(entry) = algos
-                .iter_mut()
-                .find(|entry| entry.flash_algorithm.name == algo.name && entry.core_index == core)
+            tracing::debug!("     -- using driver: {}", driver.name());
+            let plan = match plans
+                .iter()
+                .position(|plan| plan.driver.name() == driver.name() && plan.core_index == core)
             {
-                entry.add_region(region, &self.builder, restore_unwritten_bytes)?;
-            } else {
-                let mut flasher = Flasher::new(target, core, algo)?;
-                flasher.add_region(region, &self.builder, restore_unwritten_bytes)?;
+                Some(index) => &mut plans[index],
+                None => {
+                    plans.push(FlashPlan::new(core, driver));
+                    plans.last_mut().unwrap()
+                }
+            };
 
-                flasher.read_rtt_output(self.read_flasher_rtt);
-
-                algos.push(flasher);
-            }
+            plan.add_region(region, &self.builder, restore_unwritten_bytes)?;
         }
 
-        Ok(algos)
+        Ok(plans)
     }
 
     fn initialize(
         &self,
-        algos: &mut [Flasher],
+        plans: &mut [FlashPlan],
         session: &mut Session,
         options: &mut DownloadOptions,
     ) -> Result<(), FlashError> {
         let mut phases = vec![];
 
-        for flasher in algos.iter() {
-            // If the first flash algo doesn't support erase all, disable chip erase.
+        for plan in plans.iter() {
+            // If the first driver doesn't support erase all, disable chip erase.
             // TODO: we could sort by support but it's unlikely to make a difference.
-            if options.do_chip_erase && !flasher.is_chip_erase_supported(session) {
+            if options.do_chip_erase && !plan.driver.is_chip_erase_supported(session) {
                 options.do_chip_erase = false;
                 tracing::warn!(
                     "Chip erase was the selected method to erase the sectors but this chip does not support chip erases (yet)."
@@ -993,15 +1003,16 @@ impl FlashLoader {
                 .add_progress_bar(ProgressOperation::Erase, None);
         }
 
-        // Iterate all flash algorithms to initialize a few things.
-        for flasher in algos.iter_mut() {
+        // Iterate all drivers to initialize a few things.
+        for plan in plans.iter_mut() {
             let mut phase_layout = FlashLayout::default();
 
             let mut fill_size = 0;
             let mut erase_size = 0;
             let mut program_size = 0;
 
-            for region in flasher.regions.iter_mut() {
+            let encoding = plan.driver.transfer_encoding();
+            for region in plan.regions.iter_mut() {
                 let layout = region.flash_layout();
                 phase_layout.merge_from(layout.clone());
 
@@ -1009,10 +1020,7 @@ impl FlashLoader {
                 fill_size += layout.fills().iter().map(|s| s.size()).sum::<u64>();
                 program_size += region
                     .data
-                    .encoder(
-                        flasher.flash_algorithm.transfer_encoding,
-                        !options.keep_unwritten_bytes,
-                    )
+                    .encoder(encoding, !options.keep_unwritten_bytes)
                     .program_size();
             }
 

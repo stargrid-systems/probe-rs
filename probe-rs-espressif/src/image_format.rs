@@ -90,7 +90,7 @@ impl ImageLoader for IdfLoader {
 
         let mut chip_revision = 0;
         let flash_size_result = algo
-            .run_verify(session, &mut FlashProgress::empty(), |flasher, _| {
+            .run_verify(session, &mut FlashProgress::empty(), |flasher| {
                 if flasher.has_vendor_function("ChipRevision") {
                     tracing::debug!("Reading chip revision.");
                     let result = flasher.call_vendor_function("ChipRevision", [None; 4])?;

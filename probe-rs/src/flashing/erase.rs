@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use probe_rs_target::{MemoryRange, MemoryRegion, NvmRegion};
 
 use crate::Session;
+use crate::flashing::nvm_driver::NvmDriver;
 use crate::flashing::progress::ProgressOperation;
 use crate::flashing::{DownloadOptions, FlashError, FlashLoader, flasher::Flasher};
 use crate::flashing::{FlashLayout, FlashSector};
@@ -140,7 +141,7 @@ pub fn erase_all(
                 })
                 .collect::<Vec<_>>();
 
-            flasher.run_erase(session, progress, |active, _| {
+            flasher.run_erase(session, progress, |active| {
                 for info in sectors {
                     tracing::debug!(
                         "    sector: {:#010x}-{:#010x} ({} bytes)",
@@ -260,7 +261,7 @@ pub fn erase(
             Vec::new()
         };
 
-        flasher.run_erase(session, progress, |active, _| {
+        flasher.run_erase(session, progress, |active| {
             for info in &sectors {
                 tracing::debug!(
                     "    sector: {:#010x}-{:#010x} ({} bytes)",
@@ -336,7 +337,7 @@ fn read_restore_data(
     let mut restore_data = Vec::with_capacity(ranges.len());
 
     if flasher.flash_algorithm().pc_read.is_some() {
-        flasher.run_verify(session, &mut FlashProgress::empty(), |active, _| {
+        flasher.run_verify(session, &mut FlashProgress::empty(), |active| {
             for &(address, len) in &ranges {
                 let mut buf = vec![0; len];
                 active.read_flash(address, &mut buf)?;
@@ -430,7 +431,7 @@ pub fn run_blank_check(
             })
             .collect::<Vec<_>>();
 
-        flasher.run_verify(session, progress, |active, _| {
+        flasher.run_verify(session, progress, |active| {
             for info in sectors {
                 tracing::debug!(
                     "    sector: {:#010x}-{:#010x} ({} bytes)",

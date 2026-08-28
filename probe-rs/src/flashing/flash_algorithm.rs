@@ -1,4 +1,5 @@
 use super::FlashError;
+use crate::flashing::nvm_driver::NvmGeometry;
 use crate::{Target, architecture::riscv, core::Architecture};
 use probe_rs_target::{
     CoreType, Endian, FlashProperties, MemoryRegion, PageInfo, RamRegion, RawFlashAlgorithm,
@@ -68,6 +69,28 @@ pub struct FlashAlgorithm {
 
     /// The encoding format accepted by the flash algorithm.
     pub transfer_encoding: TransferEncoding,
+}
+
+impl NvmGeometry for FlashAlgorithm {
+    fn sector_info(&self, address: u64) -> Option<SectorInfo> {
+        FlashAlgorithm::sector_info(self, address)
+    }
+
+    fn page_info(&self, address: u64) -> Option<PageInfo> {
+        FlashAlgorithm::page_info(self, address)
+    }
+
+    fn sectors(&self) -> Box<dyn Iterator<Item = SectorInfo> + '_> {
+        Box::new(self.iter_sectors())
+    }
+
+    fn pages(&self) -> Box<dyn Iterator<Item = PageInfo> + '_> {
+        Box::new(self.iter_pages())
+    }
+
+    fn erased_byte_value(&self) -> u8 {
+        self.flash_properties.erased_byte_value
+    }
 }
 
 impl FlashAlgorithm {

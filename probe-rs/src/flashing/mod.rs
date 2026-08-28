@@ -50,17 +50,16 @@ mod error;
 mod flash_algorithm;
 mod flasher;
 mod loader;
+mod nvm_driver;
+mod plan;
 mod progress;
-
-use builder::*;
 
 pub use builder::{FlashDataBlockSpan, FlashFill, FlashLayout, FlashPage, FlashSector};
 pub use download::*;
 pub use erase::*;
 pub use error::*;
 pub use flash_algorithm::*;
-pub use flasher::{
-    ActiveFlasher, Erase, FlashData, Flasher, LoadedRegion, Operation, Program, Verify,
-};
+pub use flasher::{ActiveFlasher, Erase, Flasher, Operation, Program, Verify};
 pub use loader::*;
+pub use nvm_driver::{FlashData, LoadedRegion, NvmDriver, NvmGeometry, NvmReader};
 pub use progress::*;
