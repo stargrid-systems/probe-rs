@@ -1,0 +1,121 @@
+# Written by hand from the ATDF files in Microchip.ATtiny_DFP.
+#
+# Addresses use the avr-gcc convention that probe-rs uses internally. Flash
+# starts at 0x0 and the data space starts at 0x800000. The chip itself places
+# the data space at 0x0, so the probe driver subtracts the offset.
+#
+# These parts have no flash algorithm. A host side NVM driver does the flashing,
+# so probe-rs never downloads an algorithm blob to the target. That driver needs
+# the flash page size, which is 64 bytes on this part. The target schema has no
+# place for it outside a flash algorithm, so it lives in the driver for now.
+#
+# This part reports OCD version 0. The program counter register holds a byte
+# address there, not a word address.
+name: ATtiny 0-Series
+manufacturer:
+  id: 0x1f
+  cc: 0x0
+variants:
+- name: ATtiny406
+  cores:
+  - name: main
+    type: avr
+    core_access_options: !Avr {}
+  memory_map:
+  - !Nvm
+    name: PROGMEM
+    range:
+      start: 0x0
+      end: 0x1000
+    cores:
+    - main
+    access:
+      boot: true
+  - !Generic
+    name: IO
+    range:
+      start: 0x800000
+      end: 0x801100
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: SIGNATURES
+    range:
+      start: 0x801100
+      end: 0x801103
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
+  - !Nvm
+    name: PROD_SIGNATURES
+    range:
+      start: 0x801103
+      end: 0x801140
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
+  - !Nvm
+    name: FUSES
+    range:
+      start: 0x801280
+      end: 0x80128a
+    cores:
+    - main
+    access:
+      execute: false
+  # One byte here, not four as on the AVR-Dx parts. Unlocked parts read 0xc5.
+  - !Nvm
+    name: LOCKBITS
+    range:
+      start: 0x80128a
+      end: 0x80128b
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: USER_SIGNATURES
+    range:
+      start: 0x801300
+      end: 0x801320
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: EEPROM
+    range:
+      start: 0x801400
+      end: 0x801480
+    cores:
+    - main
+    access:
+      execute: false
+  # 256 bytes is the whole data memory. RTT does not fit here.
+  - !Ram
+    name: INTERNAL_SRAM
+    range:
+      start: 0x803f00
+      end: 0x804000
+    cores:
+    - main
+    access:
+      execute: false
+  # A window onto flash. All 4 KiB fits, so it covers the whole device.
+  - !Nvm
+    name: MAPPED_PROGMEM
+    range:
+      start: 0x808000
+      end: 0x809000
+    cores:
+    - main
+    is_alias: true
+    access:
+      write: false
+      execute: false

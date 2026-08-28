@@ -1,0 +1,224 @@
+# Written by hand from the ATDF files in Microchip.AVR-Dx_DFP.
+#
+# Addresses use the avr-gcc convention that probe-rs uses internally. Flash
+# starts at 0x0 and the data space starts at 0x800000. The chip itself places
+# the data space at 0x0, so the probe driver subtracts the offset.
+#
+# These parts have no flash algorithm. A host side NVM driver does the flashing,
+# so probe-rs never downloads an algorithm blob to the target. That driver needs
+# the flash page size, which is 512 bytes on every part in this family. The
+# target schema has no place for it outside a flash algorithm, so it lives in
+# the driver for now.
+#
+# Both variants report OCD version 1.
+name: AVR Dx Series
+manufacturer:
+  id: 0x1f
+  cc: 0x0
+variants:
+- name: AVR128DA64
+  cores:
+  - name: main
+    type: avr
+    core_access_options: !Avr {}
+  memory_map:
+  - !Nvm
+    name: PROGMEM
+    range:
+      start: 0x0
+      end: 0x20000
+    cores:
+    - main
+    access:
+      boot: true
+  - !Generic
+    name: IO
+    range:
+      start: 0x800000
+      end: 0x80103f
+    cores:
+    - main
+    access:
+      execute: false
+  # Unlocked parts read 0x5cc5c55c here.
+  - !Nvm
+    name: LOCKBITS
+    range:
+      start: 0x801040
+      end: 0x801044
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: FUSES
+    range:
+      start: 0x801050
+      end: 0x801060
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: USER_SIGNATURES
+    range:
+      start: 0x801080
+      end: 0x8010a0
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: SIGNATURES
+    range:
+      start: 0x801100
+      end: 0x801103
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
+  - !Nvm
+    name: PROD_SIGNATURES
+    range:
+      start: 0x801103
+      end: 0x801180
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
+  - !Nvm
+    name: EEPROM
+    range:
+      start: 0x801400
+      end: 0x801600
+    cores:
+    - main
+    access:
+      execute: false
+  - !Ram
+    name: INTERNAL_SRAM
+    range:
+      start: 0x804000
+      end: 0x808000
+    cores:
+    - main
+    access:
+      execute: false
+  # A 32 KiB window onto the low end of flash. The other 96 KiB is reachable
+  # only through the flash address space.
+  - !Nvm
+    name: MAPPED_PROGMEM
+    range:
+      start: 0x808000
+      end: 0x810000
+    cores:
+    - main
+    is_alias: true
+    access:
+      write: false
+      execute: false
+- name: AVR128DB64
+  cores:
+  - name: main
+    type: avr
+    core_access_options: !Avr {}
+  memory_map:
+  - !Nvm
+    name: PROGMEM
+    range:
+      start: 0x0
+      end: 0x20000
+    cores:
+    - main
+    access:
+      boot: true
+  - !Generic
+    name: IO
+    range:
+      start: 0x800000
+      end: 0x80103f
+    cores:
+    - main
+    access:
+      execute: false
+  # Unlocked parts read 0x5cc5c55c here.
+  - !Nvm
+    name: LOCKBITS
+    range:
+      start: 0x801040
+      end: 0x801044
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: FUSES
+    range:
+      start: 0x801050
+      end: 0x801060
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: USER_SIGNATURES
+    range:
+      start: 0x801080
+      end: 0x8010a0
+    cores:
+    - main
+    access:
+      execute: false
+  - !Nvm
+    name: SIGNATURES
+    range:
+      start: 0x801100
+      end: 0x801103
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
+  - !Nvm
+    name: PROD_SIGNATURES
+    range:
+      start: 0x801103
+      end: 0x801180
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
+  - !Nvm
+    name: EEPROM
+    range:
+      start: 0x801400
+      end: 0x801600
+    cores:
+    - main
+    access:
+      execute: false
+  - !Ram
+    name: INTERNAL_SRAM
+    range:
+      start: 0x804000
+      end: 0x808000
+    cores:
+    - main
+    access:
+      execute: false
+  # A 32 KiB window onto the low end of flash. The other 96 KiB is reachable
+  # only through the flash address space.
+  - !Nvm
+    name: MAPPED_PROGMEM
+    range:
+      start: 0x808000
+      end: 0x810000
+    cores:
+    - main
+    is_alias: true
+    access:
+      write: false
+      execute: false
