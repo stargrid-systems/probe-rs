@@ -102,6 +102,13 @@ impl UnitInfo {
         }
     }
 
+    /// Reports whether a subprogram in this unit covers `address`.
+    pub(crate) fn has_function_at(&self, address: u64) -> bool {
+        self.function_dies
+            .iter()
+            .any(|(range, _)| range.contains(&address))
+    }
+
     /// Retrieve the value of the `DW_AT_language` attribute of the compilation unit.
     ///
     /// In the unlikely event that we are unable to retrieve the language, we assume Rust.

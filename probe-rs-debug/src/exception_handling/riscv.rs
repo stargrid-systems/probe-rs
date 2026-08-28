@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
 use crate::{
-    DebugError, DebugRegisters, StackFrame, exception_handling::ExceptionInterface,
+    DebugError, DebugInfo, DebugRegisters, StackFrame, exception_handling::ExceptionInterface,
     unwind_pc_without_debuginfo,
 };
 
@@ -65,6 +65,7 @@ impl ExceptionInterface for RiscvExceptionHandler {
         frame_pc: u64,
         _stack_frames: &[StackFrame],
         instruction_set: Option<InstructionSet>,
+        _debug_info: &DebugInfo,
         memory: &mut dyn MemoryInterface,
     ) -> ControlFlow<Option<DebugError>> {
         // Use the default method to unwind PC.

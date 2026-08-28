@@ -719,6 +719,7 @@ impl DebugInfo {
                         frame_pc,
                         &stack_frames,
                         instruction_set,
+                        self,
                         memory,
                     ) {
                         if let Some(error) = error {
@@ -984,6 +985,24 @@ impl DebugInfo {
                 "No debug information available for the instruction at {address:#010x}. Please consider using instruction level stepping."
             ),
         })
+    }
+
+    /// Reports whether any compilation unit has a subprogram covering `address`.
+    ///
+    /// This only checks the cached address ranges, so it is much cheaper than
+    /// [`Self::get_function_dies`]. It is meant for filtering many candidate
+    /// addresses, such as when unwinding a stack that has no frame information.
+    ///
+    /// ```no_run
+    /// # use probe_rs_debug::DebugInfo;
+    /// let debug_info = DebugInfo::from_file("firmware.elf")?;
+    /// assert!(debug_info.has_function_at(0x0800_0132));
+    /// # Ok::<(), probe_rs_debug::DebugError>(())
+    /// ```
+    pub fn has_function_at(&self, address: u64) -> bool {
+        self.unit_infos
+            .iter()
+            .any(|unit_info| unit_info.has_function_at(address))
     }
 
     /// Search across all compilation units, and retrieve the DIEs for the function containing the given address.

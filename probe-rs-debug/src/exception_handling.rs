@@ -20,6 +20,7 @@ pub(crate) mod armv6m_armv7m_shared;
 // NOTE: There is also a [`CoreType::Armv7em`] variant, but it is not currently used/implemented in probe-rs.
 pub(crate) mod armv7m;
 pub(crate) mod armv8m;
+pub(crate) mod avr;
 pub(crate) mod riscv;
 pub(crate) mod xtensa;
 
@@ -32,7 +33,8 @@ pub fn exception_handler_for_core(core_type: CoreType) -> Box<dyn ExceptionInter
         CoreType::Armv8m => Box::new(armv8m::ArmV8MExceptionHandler),
         CoreType::Xtensa => Box::<xtensa::XtensaExceptionHandler>::default(),
         CoreType::Riscv | CoreType::Riscv64 => Box::new(riscv::RiscvExceptionHandler),
-        CoreType::Armv7a | CoreType::Armv7r | CoreType::Armv8a | CoreType::Avr => {
+        CoreType::Avr => Box::new(avr::AvrExceptionHandler),
+        CoreType::Armv7a | CoreType::Armv7r | CoreType::Armv8a => {
             Box::new(UnimplementedExceptionHandler)
         }
     }
@@ -105,15 +107,19 @@ pub trait ExceptionInterface {
         Err(DebugError::NotImplemented("exception description"))
     }
 
-    /// Unwind the stack without debug info.
+    /// Unwind the stack without call frame information.
     ///
     /// This method can be implemented to provide a stack trace using frame pointers, for example.
+    /// `debug_info` is passed so that an implementation can check a candidate address against the
+    /// functions the program actually contains. AVR needs this, because it has no call frame
+    /// information at all and has to scan the stack.
     fn unwind_without_debuginfo(
         &self,
         unwind_registers: &mut DebugRegisters,
         frame_pc: u64,
         _stack_frames: &[StackFrame],
         instruction_set: Option<InstructionSet>,
+        _debug_info: &DebugInfo,
         _memory: &mut dyn MemoryInterface,
     ) -> ControlFlow<Option<DebugError>> {
         unwind_pc_without_debuginfo(unwind_registers, frame_pc, instruction_set)
