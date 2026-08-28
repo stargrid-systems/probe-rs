@@ -443,8 +443,9 @@ impl<'probe> AvrCommunicationInterface<'probe> {
 
     /// Switches the open programming session over to debugging.
     ///
-    /// This sends the on-chip debug key. It leaves the core running, so a
-    /// caller that wants a halted core has to halt it afterwards.
+    /// This sends the on-chip debug key and then lets the part out of reset, so
+    /// it leaves the core running. A caller that wants a halted core has to halt
+    /// it afterwards.
     ///
     /// It does nothing when the session is already a debug session, which is
     /// what happens when a second core handle is taken from the same session.
@@ -453,7 +454,13 @@ impl<'probe> AvrCommunicationInterface<'probe> {
             return Ok(());
         }
 
-        self.probe.enter_debug_mode().map_err(probe_error)
+        self.probe.enter_debug_mode().map_err(probe_error)?;
+
+        // Opening the session asserted reset and the part is still sitting in
+        // it. Until it is let go the core executes nothing, which makes `Halt`
+        // fail rather than stop anything. A debug reset is what releases it,
+        // and it leaves the core stopped on the reset vector.
+        self.debug_reset()
     }
 
     /// Reports whether the core is stopped.
