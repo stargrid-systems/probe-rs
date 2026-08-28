@@ -174,8 +174,15 @@ pub enum ScriptName {
     /// Resets the core and stops it at the reset vector.
     DebugReset,
     /// Asserts reset and keeps it asserted.
+    ///
+    /// Do not run this on its own. Unlike every script that is known to work,
+    /// its bytecode has no `0x5a` terminator, and running it hangs the tool.
     HoldInReset,
     /// Releases a reset asserted by [`ScriptName::HoldInReset`].
+    ///
+    /// Do not run this on its own, for the same reason as
+    /// [`ScriptName::HoldInReset`]. Use [`ScriptName::DebugReset`] to get a
+    /// part out of the reset that opening a session asserts.
     ReleaseFromReset,
 }
 
