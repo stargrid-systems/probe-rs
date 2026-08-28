@@ -6,6 +6,7 @@ use crate::{
             core::{CortexARState, CortexMState},
             dp::DpAddress,
         },
+        avr::{Avr, AvrCoreState, communication_interface::AvrCommunicationInterface},
         riscv::{Riscv64, RiscvCoreState, communication_interface::RiscvCommunicationInterface},
         xtensa::{XtensaCoreState, communication_interface::XtensaCommunicationInterface},
     },
@@ -244,6 +245,36 @@ impl CombinedCoreState {
         ))
     }
 
+    pub(crate) fn attach_avr<'probe>(
+        &'probe mut self,
+        target: &'probe Target,
+        interface: AvrCommunicationInterface<'probe>,
+    ) -> Result<Core<'probe>, Error> {
+        let name = &target.cores[self.id].name;
+
+        let ResolvedCoreOptions::Avr { sequence, .. } = &self.core_state.core_access_options else {
+            unreachable!(
+                "The stored core state is not compatible with the AVR architecture. \
+                This should never happen. Please file a bug if it does."
+            );
+        };
+        let debug_sequence = sequence.clone();
+
+        let SpecificCoreState::Avr(s) = &mut self.specific_state else {
+            unreachable!(
+                "The stored core state is not compatible with the AVR architecture. \
+                This should never happen. Please file a bug if it does."
+            );
+        };
+
+        Ok(Core::new(
+            self.id,
+            name,
+            target,
+            Avr::new(interface, s, debug_sequence)?,
+        ))
+    }
+
     /// Get the memory AP for this core.
     ///
     /// ## Panic
@@ -317,6 +348,8 @@ pub enum SpecificCoreState {
     Riscv64(RiscvCoreState),
     /// The state of an Xtensa core.
     Xtensa(XtensaCoreState),
+    /// The state of an AVR core.
+    Avr(AvrCoreState),
 }
 
 impl SpecificCoreState {
@@ -332,7 +365,7 @@ impl SpecificCoreState {
             CoreType::Riscv => SpecificCoreState::Riscv(RiscvCoreState::new()),
             CoreType::Riscv64 => SpecificCoreState::Riscv64(RiscvCoreState::new()),
             CoreType::Xtensa => SpecificCoreState::Xtensa(XtensaCoreState::new()),
-            CoreType::Avr => todo!("AVR core support is not implemented yet"),
+            CoreType::Avr => SpecificCoreState::Avr(AvrCoreState::new()),
         }
     }
 
@@ -348,6 +381,7 @@ impl SpecificCoreState {
             SpecificCoreState::Riscv(_) => CoreType::Riscv,
             SpecificCoreState::Riscv64(_) => CoreType::Riscv64,
             SpecificCoreState::Xtensa(_) => CoreType::Xtensa,
+            SpecificCoreState::Avr(_) => CoreType::Avr,
         }
     }
 }

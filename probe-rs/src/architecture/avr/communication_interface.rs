@@ -30,6 +30,8 @@
 use std::fmt;
 use std::sync::Once;
 
+use crate::error::Error;
+use crate::memory::MemoryInterface;
 use crate::probe::DebugProbeError;
 use crate::probe::pickit::{AvrFamily, Params, Pickit, ScriptName, SessionState};
 
@@ -45,6 +47,21 @@ pub const DATA_SPACE_OFFSET: u64 = 0x0080_0000;
 /// Script parameters are 32-bit, so this bounds the translated address rather
 /// than the AVR address space, which is far smaller.
 const MAX_TOOL_ADDRESS: u64 = u32::MAX as u64;
+
+/// How many hardware breakpoint units the debug block has.
+///
+/// There are exactly two and there is no way around it.
+pub const HW_BREAKPOINT_UNITS: usize = 2;
+
+/// What `GetHaltStatus` answers for a stopped core.
+///
+/// An earlier note in this repository had the two values the other way round.
+/// This is the polarity a live part showed, and it agrees with the script,
+/// which branches to this value when `ASI_OCD_STATUS.STOPPED` is set.
+const HALTED: u32 = 0xAAAA_AAAA;
+
+/// What `GetHaltStatus` answers for a running core.
+const RUNNING: u32 = 0x5555_5555;
 
 /// Converts a probe-rs address in the data space to the address the chip uses.
 ///
@@ -153,6 +170,20 @@ pub enum AvrError {
 
     /// The device signature reply was {0} bytes, which is too short to decode.
     ShortDeviceId(usize),
+
+    /// The {script} script answered with {length} bytes, but a word was expected.
+    ShortScriptReply {
+        /// The script that answered.
+        script: ScriptName,
+        /// How many bytes it answered with.
+        length: usize,
+    },
+
+    /// The halt status reply was {0:#010x}, which is neither halted nor running.
+    UnknownHaltStatus(u32),
+
+    /// Breakpoint unit {0} does not exist. An AVR has two.
+    NoSuchBreakpointUnit(usize),
 }
 
 impl From<AvrError> for crate::Error {
@@ -300,6 +331,11 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         self.probe.state()
     }
 
+    /// The part family this interface was built for.
+    pub fn family(&self) -> AvrFamily {
+        self.state.family
+    }
+
     /// Opens a programming session, which is the only safe first operation.
     ///
     /// Any requested UPDI clock is applied afterwards, because the tool only
@@ -392,12 +428,119 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         self.write(ScriptName::WriteProgmem, tool_address, data)
     }
 
+    /// Switches the open programming session over to debugging.
+    ///
+    /// This sends the on-chip debug key. It leaves the core running, so a
+    /// caller that wants a halted core has to halt it afterwards.
+    ///
+    /// It does nothing when the session is already a debug session, which is
+    /// what happens when a second core handle is taken from the same session.
+    pub fn enter_debug_mode(&mut self) -> Result<(), AvrError> {
+        if self.probe.state() == SessionState::Debugging {
+            return Ok(());
+        }
+
+        self.probe.enter_debug_mode().map_err(probe_error)
+    }
+
+    /// Reports whether the core is stopped.
+    pub fn is_halted(&mut self) -> Result<bool, AvrError> {
+        match self.inline_word(ScriptName::GetHaltStatus, Params::Words(&[]))? {
+            HALTED => Ok(true),
+            RUNNING => Ok(false),
+            other => Err(AvrError::UnknownHaltStatus(other)),
+        }
+    }
+
+    /// Stops the core.
+    pub fn halt(&mut self) -> Result<(), AvrError> {
+        self.command(ScriptName::Halt, Params::Words(&[]))
+    }
+
+    /// Starts the core.
+    pub fn run(&mut self) -> Result<(), AvrError> {
+        self.command(ScriptName::Run, Params::Words(&[]))
+    }
+
+    /// Executes one instruction and stops again.
+    ///
+    /// The script sets the step trap, resumes, and waits for the halt, so the
+    /// core is stopped again when this returns.
+    pub fn step(&mut self) -> Result<(), AvrError> {
+        self.command(ScriptName::SingleStep, Params::Words(&[]))
+    }
+
+    /// Resets the core and leaves it stopped at the reset vector.
+    ///
+    /// This is reset and halt in one operation, so nothing has to catch the
+    /// core on its way out of reset.
+    pub fn debug_reset(&mut self) -> Result<(), AvrError> {
+        self.command(ScriptName::DebugReset, Params::Words(&[]))
+    }
+
+    /// Reads the program counter as a word address.
+    ///
+    /// The debug block holds the program counter plus one, and in different
+    /// units on the two debug revisions. The script undoes both, so what comes
+    /// back here is the plain word address of the next instruction.
+    pub fn program_counter(&mut self) -> Result<u32, AvrError> {
+        self.inline_word(ScriptName::GetPc, Params::Words(&[]))
+    }
+
+    /// Writes the program counter, as a word address.
+    pub fn set_program_counter(&mut self, word_address: u32) -> Result<(), AvrError> {
+        self.command(ScriptName::SetPc, Params::Words(&[word_address]))
+    }
+
+    /// Arms a hardware breakpoint at a word address.
+    ///
+    /// The script writes the address register and the per-unit enable bit, but
+    /// not the global one, so the caller still has to set `HWBP` in `TRAPEN`.
+    pub fn set_hw_breakpoint(&mut self, unit: usize, word_address: u32) -> Result<(), AvrError> {
+        self.command(
+            ScriptName::SetHwBp,
+            Params::Words(&[check_breakpoint_unit(unit)?, word_address]),
+        )
+    }
+
+    /// Disarms a hardware breakpoint.
+    pub fn clear_hw_breakpoint(&mut self, unit: usize) -> Result<(), AvrError> {
+        self.command(
+            ScriptName::ClearHwBp,
+            Params::Words(&[check_breakpoint_unit(unit)?]),
+        )
+    }
+
     /// Closes the session and leaves the tool ready for a new one.
     pub fn close(&mut self) -> Result<(), AvrError> {
         self.probe.exit().map_err(probe_error)?;
         self.state.device_id = None;
 
         Ok(())
+    }
+
+    /// Runs a script that answers with nothing.
+    fn command(&mut self, name: ScriptName, params: Params<'_>) -> Result<(), AvrError> {
+        self.probe.run(name, params).map_err(probe_error)?;
+
+        Ok(())
+    }
+
+    /// Runs a script that answers with one word inside the response.
+    fn inline_word(&mut self, name: ScriptName, params: Params<'_>) -> Result<u32, AvrError> {
+        let response = self.probe.run(name, params).map_err(probe_error)?;
+        let data = response.inline_data();
+
+        let bytes = data
+            .get(..4)
+            .ok_or(AvrError::ShortScriptReply {
+                script: name,
+                length: data.len(),
+            })?
+            .try_into()
+            .expect("slice is four bytes");
+
+        Ok(u32::from_le_bytes(bytes))
     }
 
     fn read(
@@ -435,6 +578,15 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     }
 }
 
+/// An AVR has two breakpoint units, and the script takes the index as a word.
+fn check_breakpoint_unit(unit: usize) -> Result<u32, AvrError> {
+    if unit >= HW_BREAKPOINT_UNITS {
+        return Err(AvrError::NoSuchBreakpointUnit(unit));
+    }
+
+    Ok(unit as u32)
+}
+
 /// A word-wide script steps two bytes at a time, so both ends have to be even.
 fn check_word_aligned(address: u64, length: usize) -> Result<(), AvrError> {
     if !address.is_multiple_of(2) || !length.is_multiple_of(2) {
@@ -447,6 +599,178 @@ fn check_word_aligned(address: u64, length: usize) -> Result<(), AvrError> {
 /// Wraps a probe-specific error so this module does not name the probe driver.
 fn probe_error(err: impl crate::probe::ProbeError) -> AvrError {
     AvrError::DebugProbe(DebugProbeError::ProbeSpecific(err.into()))
+}
+
+/// Which of the two AVR address spaces an address falls in.
+///
+/// AVR is a Harvard machine, so flash and the data space are separate memories
+/// that both start at zero on the chip. probe-rs tells them apart by address,
+/// following the avr-gcc convention, and so does this.
+///
+/// # Examples
+///
+/// ```
+/// use probe_rs::architecture::avr::communication_interface::AddressSpace;
+///
+/// // The reset vector.
+/// assert_eq!(AddressSpace::of(0x0), AddressSpace::Flash);
+/// // SRAM of an AVR128DA64.
+/// assert_eq!(AddressSpace::of(0x80_4000), AddressSpace::Data);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressSpace {
+    /// Flash, which probe-rs places below [`DATA_SPACE_OFFSET`].
+    Flash,
+    /// The data space, which probe-rs places at [`DATA_SPACE_OFFSET`] and above.
+    ///
+    /// This one memory holds the IO registers, the fuses, the EEPROM, SRAM, and
+    /// the window that part of flash is mapped into.
+    Data,
+}
+
+impl AddressSpace {
+    /// The space a probe-rs address belongs to.
+    pub fn of(address: u64) -> Self {
+        if address < DATA_SPACE_OFFSET {
+            AddressSpace::Flash
+        } else {
+            AddressSpace::Data
+        }
+    }
+}
+
+impl AvrCommunicationInterface<'_> {
+    /// Reads bytes from whichever space the address belongs to.
+    fn read_bytes(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
+        match AddressSpace::of(address) {
+            AddressSpace::Flash => self.read_flash(address, data),
+            AddressSpace::Data => self.read_data_8(address, data),
+        }
+    }
+
+    /// Writes bytes to whichever space the address belongs to.
+    fn write_bytes(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
+        match AddressSpace::of(address) {
+            AddressSpace::Flash => self.write_flash(address, data),
+            AddressSpace::Data => self.write_data_8(address, data),
+        }
+    }
+
+    /// Reads bytes a word at a time where the space has a word-wide script.
+    ///
+    /// Flash has no word-wide script, so a flash read falls back to the same
+    /// call [`AvrCommunicationInterface::read_bytes`] makes.
+    fn read_words(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
+        match AddressSpace::of(address) {
+            AddressSpace::Flash => self.read_flash(address, data),
+            AddressSpace::Data => self.read_data_16(address, data),
+        }
+    }
+
+    /// Writes bytes a word at a time. See [`AvrCommunicationInterface::read_words`].
+    fn write_words(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
+        match AddressSpace::of(address) {
+            AddressSpace::Flash => self.write_flash(address, data),
+            AddressSpace::Data => self.write_data_16(address, data),
+        }
+    }
+}
+
+/// Memory access on an 8-bit Harvard machine.
+///
+/// Every access routes to flash or to the data space by address, and the widths
+/// wider than a byte are built out of the byte and word scripts. There is no
+/// native access wider than 16 bits.
+impl MemoryInterface<Error> for AvrCommunicationInterface<'_> {
+    fn supports_native_64bit_access(&mut self) -> bool {
+        false
+    }
+
+    fn supports_8bit_transfers(&self) -> Result<bool, Error> {
+        Ok(true)
+    }
+
+    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
+        Ok(self.read_bytes(address, data)?)
+    }
+
+    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
+        let mut bytes = vec![0; data.len() * 2];
+        self.read_words(address, &mut bytes)?;
+
+        let (chunks, _rest) = bytes.as_chunks::<2>();
+        for (word, chunk) in data.iter_mut().zip(chunks) {
+            *word = u16::from_le_bytes(*chunk);
+        }
+
+        Ok(())
+    }
+
+    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
+        let mut bytes = vec![0; data.len() * 4];
+        self.read_bytes(address, &mut bytes)?;
+
+        let (chunks, _rest) = bytes.as_chunks::<4>();
+        for (word, chunk) in data.iter_mut().zip(chunks) {
+            *word = u32::from_le_bytes(*chunk);
+        }
+
+        Ok(())
+    }
+
+    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
+        let mut bytes = vec![0; data.len() * 8];
+        self.read_bytes(address, &mut bytes)?;
+
+        let (chunks, _rest) = bytes.as_chunks::<8>();
+        for (word, chunk) in data.iter_mut().zip(chunks) {
+            *word = u64::from_le_bytes(*chunk);
+        }
+
+        Ok(())
+    }
+
+    /// Reads without widening the access.
+    ///
+    /// The default implementation rounds the access out to 32-bit boundaries.
+    /// The bottom of the AVR data space is the IO registers, where reading a
+    /// byte nobody asked for can have a side effect, so this reads exactly what
+    /// was asked for instead.
+    fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
+        Ok(self.read_bytes(address, data)?)
+    }
+
+    fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
+        Ok(self.write_bytes(address, data)?)
+    }
+
+    fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), Error> {
+        let bytes: Vec<u8> = data.iter().flat_map(|word| word.to_le_bytes()).collect();
+
+        Ok(self.write_words(address, &bytes)?)
+    }
+
+    fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
+        let bytes: Vec<u8> = data.iter().flat_map(|word| word.to_le_bytes()).collect();
+
+        Ok(self.write_bytes(address, &bytes)?)
+    }
+
+    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), Error> {
+        let bytes: Vec<u8> = data.iter().flat_map(|word| word.to_le_bytes()).collect();
+
+        Ok(self.write_bytes(address, &bytes)?)
+    }
+
+    /// Writes without widening the access. See [`MemoryInterface::read`].
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
+        Ok(self.write_bytes(address, data)?)
+    }
+
+    /// Nothing is buffered, so there is nothing to flush.
+    fn flush(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -542,6 +866,43 @@ mod tests {
         assert!(check_word_aligned(0x80_4000, 0).is_ok());
         assert!(check_word_aligned(0x80_4001, 2).is_err());
         assert!(check_word_aligned(0x80_4000, 3).is_err());
+    }
+
+    /// Routing is the whole of the Harvard split, so pin where the boundary is
+    /// and that each of the three memories of a part lands on the right side.
+    #[test]
+    fn addresses_route_to_the_space_that_holds_them() {
+        assert_eq!(AddressSpace::of(0x0), AddressSpace::Flash);
+        assert_eq!(AddressSpace::of(0x1_FFFF), AddressSpace::Flash);
+        assert_eq!(AddressSpace::of(DATA_SPACE_OFFSET - 1), AddressSpace::Flash);
+
+        assert_eq!(AddressSpace::of(DATA_SPACE_OFFSET), AddressSpace::Data);
+        for &(probe_rs, _) in DATA_SPACE {
+            assert_eq!(AddressSpace::of(probe_rs), AddressSpace::Data);
+        }
+    }
+
+    /// The debug block is in the data space, so run control reaches it with the
+    /// ordinary memory scripts.
+    #[test]
+    fn the_debug_block_is_in_the_data_space() {
+        use crate::architecture::avr::ocd;
+
+        assert_eq!(
+            AddressSpace::of(ocd::address(ocd::REGISTER_FILE)),
+            AddressSpace::Data
+        );
+        assert_eq!(
+            to_chip_data_address(ocd::address(ocd::REGISTER_FILE)).unwrap(),
+            0x0FA0
+        );
+    }
+
+    #[test]
+    fn only_the_two_breakpoint_units_are_accepted() {
+        assert_eq!(check_breakpoint_unit(0).unwrap(), 0);
+        assert_eq!(check_breakpoint_unit(1).unwrap(), 1);
+        assert!(check_breakpoint_unit(2).is_err());
     }
 
     #[test]

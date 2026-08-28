@@ -181,9 +181,10 @@ impl ArchitectureInterface {
                     }
                 }
             }
-            // The AVR core is not implemented yet. The communication interface
-            // exists and can be reached through `Session::get_avr_interface`.
-            ArchitectureInterface::Avr(..) => Err(Error::NotImplemented("AVR core debugging")),
+            ArchitectureInterface::Avr(probe, state) => {
+                let iface = probe.try_get_avr_interface(state)?;
+                combined_state.attach_avr(target, iface)
+            }
         }
     }
 }

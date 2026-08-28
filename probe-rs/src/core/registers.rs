@@ -500,6 +500,8 @@ impl CoreRegisters {
         fpu_support: bool,
         floating_point_register_count: Option<usize>,
     ) -> &'static CoreRegisters {
+        use crate::architecture::avr::registers::AVR_CORE_REGISTERS;
+
         use crate::architecture::arm::core::registers::aarch32::{
             AARCH32_CORE_REGISTERS, AARCH32_WITH_FP_16_CORE_REGISTERS,
             AARCH32_WITH_FP_32_CORE_REGISTERS,
@@ -549,7 +551,7 @@ impl CoreRegisters {
                 }
             }
             CoreType::Xtensa => &XTENSA_CORE_REGISTERS,
-            CoreType::Avr => todo!("AVR register descriptions are not implemented yet"),
+            CoreType::Avr => &AVR_CORE_REGISTERS,
         }
     }
 

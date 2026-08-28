@@ -1,4 +1,556 @@
 //! All the interface bits for AVR targets.
+//!
+//! An AVR is an 8-bit Harvard machine, which shows up in two places.
+//!
+//! Flash and the data space are separate memories that both start at zero on
+//! the chip, so an address alone does not say which one it means. probe-rs
+//! follows the avr-gcc convention and puts flash below `0x800000` and the data
+//! space above it. See [`communication_interface`] for the translation.
+//!
+//! The program counter counts instruction words, while probe-rs and the debug
+//! information count bytes. [`Avr`] doubles what it reads and halves what it
+//! writes, so nothing above it has to know.
+//!
+//! Run control goes through the tool's own scripts rather than through writes
+//! to the debug block. Both routes reach the same hardware, and the scripts are
+//! the ones that have been proven on a part.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use probe_rs_target::{Architecture, CoreType, InstructionSet};
+
+use crate::core::registers::{CoreRegisters, RegisterId, RegisterValue};
+use crate::error::Error;
+use crate::memory::CoreMemoryInterface;
+use crate::{
+    BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus, HaltReason,
+    MemoryInterface,
+};
+
+use self::communication_interface::{AvrCommunicationInterface, HW_BREAKPOINT_UNITS};
+use self::ocd::OcdVersion;
+use self::registers::{AVR_CORE_REGISTERS, FP, PC, SP, SREG};
+use self::sequences::AvrDebugSequence;
 
 pub mod communication_interface;
+pub mod ocd;
+pub mod registers;
 pub mod sequences;
+
+/// How long to wait between polls while waiting for the core to stop.
+const HALT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// The state of an AVR core that outlives a single core handle.
+#[derive(Debug)]
+pub struct AvrCoreState {
+    /// The address armed in each breakpoint unit, as a byte address.
+    ///
+    /// The debug block does not report which units are in use in a form that
+    /// survives the address encoding, so this is tracked here instead.
+    hw_breakpoints: [Option<u64>; HW_BREAKPOINT_UNITS],
+
+    /// Whether the global hardware breakpoint enable is set.
+    breakpoints_enabled: bool,
+
+    /// Set while the last resume was a single step.
+    ///
+    /// The halt cause shares one bit between breakpoint unit 0 and a finished
+    /// step, on both debug revisions, so the two can only be told apart by
+    /// remembering which one was asked for.
+    expecting_step: bool,
+
+    /// The debug revision, once it has been read off the part.
+    ocd_version: Option<OcdVersion>,
+}
+
+impl AvrCoreState {
+    /// Creates the state for a core that has not been attached to yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            hw_breakpoints: [None; HW_BREAKPOINT_UNITS],
+            breakpoints_enabled: false,
+            expecting_step: false,
+            ocd_version: None,
+        }
+    }
+}
+
+/// An interface to operate an AVR core.
+pub struct Avr<'probe> {
+    interface: AvrCommunicationInterface<'probe>,
+    state: &'probe mut AvrCoreState,
+}
+
+impl<'probe> Avr<'probe> {
+    /// Attaches to an AVR core over an open UPDI session.
+    ///
+    /// The session has to be in programming mode already, which is what
+    /// `Session` leaves it in. This switches it over to debugging, which sends
+    /// the on-chip debug key. The core keeps running, so a caller that wants it
+    /// stopped has to halt it.
+    ///
+    /// The debug sequence is taken but not used. [`AvrDebugSequence`] has no
+    /// hooks yet, and this signature is here so adding one does not change every
+    /// call site.
+    pub fn new(
+        interface: AvrCommunicationInterface<'probe>,
+        state: &'probe mut AvrCoreState,
+        _sequence: Arc<dyn AvrDebugSequence>,
+    ) -> Result<Self, Error> {
+        let mut this = Self { interface, state };
+        this.interface.enter_debug_mode()?;
+
+        Ok(this)
+    }
+
+    fn core_info(&mut self) -> Result<CoreInformation, Error> {
+        let pc = self.read_core_reg(PC.id)?;
+
+        Ok(CoreInformation { pc: pc.try_into()? })
+    }
+
+    /// Reads one byte out of the memory-mapped debug block.
+    fn read_ocd_8(&mut self, offset: u64) -> Result<u8, Error> {
+        self.interface.read_word_8(ocd::address(offset))
+    }
+
+    fn write_ocd_8(&mut self, offset: u64, value: u8) -> Result<(), Error> {
+        self.interface.write_word_8(ocd::address(offset), value)
+    }
+
+    /// Reads one 16-bit debug block field, a byte at a time.
+    ///
+    /// The fields that span two bytes are byte pairs rather than true words, and
+    /// byte access to them is the access that has been read back from a part.
+    fn read_ocd_16(&mut self, offset: u64) -> Result<u16, Error> {
+        let mut bytes = [0; 2];
+        self.interface.read_8(ocd::address(offset), &mut bytes)?;
+
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn write_ocd_16(&mut self, offset: u64, value: u16) -> Result<(), Error> {
+        self.interface
+            .write_8(ocd::address(offset), &value.to_le_bytes())
+    }
+
+    /// Sets or clears bits in `TRAPEN`, leaving the rest of it alone.
+    ///
+    /// `TRAPEN` carries the software breakpoint enable, which the part sets by
+    /// itself on entering debug mode, so it must never be written whole.
+    fn update_trapen(&mut self, set: u16, clear: u16) -> Result<(), Error> {
+        let current = self.read_ocd_16(ocd::TRAPEN)?;
+        let updated = (current & !clear) | set;
+
+        if updated != current {
+            self.write_ocd_16(ocd::TRAPEN, updated)?;
+        }
+
+        Ok(())
+    }
+
+    /// Reads a byte of the register file, which is mapped into the debug block.
+    fn read_register_file(&mut self, index: u64) -> Result<u8, Error> {
+        self.read_ocd_8(ocd::REGISTER_FILE + index)
+    }
+
+    fn write_register_file(&mut self, index: u64, value: u8) -> Result<(), Error> {
+        self.write_ocd_8(ocd::REGISTER_FILE + index, value)
+    }
+
+    /// Checks the debug revision of the part against the one its family implies.
+    ///
+    /// The raw program counter register and the `GetPC` script disagree in a way
+    /// that depends only on the revision, so comparing the two identifies it.
+    /// That is more reliable than the System Information Block, which this tool
+    /// returns truncated.
+    ///
+    /// Both formulas agree while the core sits at the reset vector, and then
+    /// this leaves the revision unknown and tries again at the next halt.
+    fn check_ocd_version(&mut self) -> Result<(), Error> {
+        if self.state.ocd_version.is_some() {
+            return Ok(());
+        }
+
+        let expected = OcdVersion::for_family(self.interface.family());
+        let raw = u32::from(self.read_ocd_16(ocd::PC)?);
+        let word_pc = self.interface.program_counter()?;
+
+        match OcdVersion::detect(raw, word_pc) {
+            Some(found) => {
+                self.state.ocd_version = Some(found);
+
+                if found != expected {
+                    tracing::warn!(
+                        "The part reports on-chip debug {found:?} but its family implies \
+                         {expected:?}. The target description may name the wrong part."
+                    );
+                }
+            }
+            None => tracing::debug!("Cannot tell the on-chip debug revision apart at this address"),
+        }
+
+        Ok(())
+    }
+
+    /// Turns the `CAUSE` field into the reason probe-rs reports.
+    ///
+    /// Breakpoint unit 0 and a finished step share one bit, so the caller has to
+    /// say which of the two it was expecting.
+    fn halt_reason(cause: u16, expecting_step: bool) -> HaltReason {
+        use self::ocd::cause;
+
+        if cause & cause::SWBP != 0 {
+            HaltReason::Breakpoint(BreakpointCause::Software)
+        } else if cause & cause::BP0_OR_STEP != 0 {
+            if expecting_step {
+                HaltReason::Step
+            } else {
+                HaltReason::Breakpoint(BreakpointCause::Hardware)
+            }
+        } else if cause & cause::BP1 != 0 {
+            HaltReason::Breakpoint(BreakpointCause::Hardware)
+        } else if cause & cause::RESET != 0 {
+            // A reset only stops the core because a debug reset was asked for.
+            HaltReason::Request
+        } else if cause & cause::EXT != 0 {
+            HaltReason::Request
+        } else if cause & cause::EXTBRK != 0 {
+            HaltReason::External
+        } else if cause & cause::INT != 0 {
+            HaltReason::Exception
+        } else {
+            HaltReason::Unknown
+        }
+    }
+
+    /// Turns a word program counter into the byte address probe-rs uses.
+    ///
+    /// The core counts instruction words. Flash addresses in an ELF file, in the
+    /// debug information, and in every probe-rs API count bytes, and AVR
+    /// instructions are two or four bytes long, so the two differ by a factor of
+    /// two.
+    fn word_to_byte_address(word_address: u32) -> u64 {
+        u64::from(word_address) * 2
+    }
+
+    /// Turns a byte address in flash into the word address the scripts take.
+    ///
+    /// Instructions are always at even addresses, so an odd address cannot be
+    /// the start of one and is rounded down.
+    fn byte_to_word_address(byte_address: u64) -> u32 {
+        (byte_address / 2) as u32
+    }
+}
+
+impl CoreMemoryInterface for Avr<'_> {
+    type ErrorType = Error;
+
+    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
+        &self.interface
+    }
+
+    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
+        &mut self.interface
+    }
+}
+
+impl CoreInterface for Avr<'_> {
+    fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if self.interface.is_halted()? {
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+
+            std::thread::sleep(HALT_POLL_INTERVAL);
+        }
+    }
+
+    fn core_halted(&mut self) -> Result<bool, Error> {
+        Ok(self.interface.is_halted()?)
+    }
+
+    fn status(&mut self) -> Result<CoreStatus, Error> {
+        if !self.interface.is_halted()? {
+            return Ok(CoreStatus::Running);
+        }
+
+        self.check_ocd_version()?;
+
+        let cause = self.read_ocd_16(ocd::CAUSE)?;
+
+        Ok(CoreStatus::Halted(Self::halt_reason(
+            cause,
+            self.state.expecting_step,
+        )))
+    }
+
+    fn halt(&mut self, timeout: Duration) -> Result<CoreInformation, Error> {
+        self.state.expecting_step = false;
+        self.interface.halt()?;
+        self.wait_for_core_halted(timeout)?;
+
+        self.core_info()
+    }
+
+    fn run(&mut self) -> Result<(), Error> {
+        self.state.expecting_step = false;
+
+        Ok(self.interface.run()?)
+    }
+
+    fn reset(&mut self) -> Result<(), Error> {
+        self.reset_and_halt(Duration::from_millis(500))?;
+
+        self.run()
+    }
+
+    fn reset_and_halt(&mut self, timeout: Duration) -> Result<CoreInformation, Error> {
+        self.state.expecting_step = false;
+
+        // The debug reset script leaves the core stopped at the reset vector,
+        // so reset and halt need no separate steps.
+        self.interface.debug_reset()?;
+        self.wait_for_core_halted(timeout)?;
+
+        self.core_info()
+    }
+
+    fn step(&mut self) -> Result<CoreInformation, Error> {
+        // The script sets the step trap, resumes, and waits for the halt, so the
+        // core is stopped again by the time this returns.
+        self.interface.step()?;
+        self.state.expecting_step = true;
+
+        self.core_info()
+    }
+
+    fn read_core_reg(&mut self, address: RegisterId) -> Result<RegisterValue, Error> {
+        let value = match address {
+            id if id == PC.id => {
+                let word_address = self.interface.program_counter()?;
+                Self::word_to_byte_address(word_address) as u32
+            }
+            id if id == SP.id => u32::from(self.read_ocd_16(ocd::SP)?),
+            id if id == SREG.id => u32::from(self.read_ocd_8(ocd::SREG)?),
+            id if id == FP.id => {
+                // The Y pair is r28 and r29 of the register file.
+                let low = self.read_register_file(28)?;
+                let high = self.read_register_file(29)?;
+                u32::from(u16::from_le_bytes([low, high]))
+            }
+            RegisterId(index) if usize::from(index) < ocd::REGISTER_FILE_LEN => {
+                u32::from(self.read_register_file(u64::from(index))?)
+            }
+            other => {
+                return Err(Error::Register(format!(
+                    "{other:?} is not a register of an AVR core"
+                )));
+            }
+        };
+
+        Ok(RegisterValue::U32(value))
+    }
+
+    fn write_core_reg(&mut self, address: RegisterId, value: RegisterValue) -> Result<(), Error> {
+        let value: u32 = value.try_into()?;
+
+        match address {
+            id if id == PC.id => {
+                let word_address = Self::byte_to_word_address(u64::from(value));
+                self.interface.set_program_counter(word_address)?;
+            }
+            id if id == SP.id => self.write_ocd_16(ocd::SP, value as u16)?,
+            id if id == SREG.id => self.write_ocd_8(ocd::SREG, value as u8)?,
+            id if id == FP.id => {
+                let [low, high] = (value as u16).to_le_bytes();
+                self.write_register_file(28, low)?;
+                self.write_register_file(29, high)?;
+            }
+            RegisterId(index) if usize::from(index) < ocd::REGISTER_FILE_LEN => {
+                self.write_register_file(u64::from(index), value as u8)?
+            }
+            other => {
+                return Err(Error::Register(format!(
+                    "{other:?} is not a register of an AVR core"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn available_breakpoint_units(&mut self) -> Result<u32, Error> {
+        Ok(HW_BREAKPOINT_UNITS as u32)
+    }
+
+    fn hw_breakpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
+        Ok(self.state.hw_breakpoints.to_vec())
+    }
+
+    fn enable_breakpoints(&mut self, state: bool) -> Result<(), Error> {
+        self.state.breakpoints_enabled = state;
+
+        if state {
+            self.update_trapen(ocd::trapen::HWBP, 0)
+        } else {
+            self.update_trapen(0, ocd::trapen::HWBP)
+        }
+    }
+
+    fn set_hw_breakpoint(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
+        let word_address = Self::byte_to_word_address(addr);
+        self.interface.set_hw_breakpoint(unit_index, word_address)?;
+        self.state.hw_breakpoints[unit_index] = Some(addr);
+
+        // A breakpoint needs the global enable as well as the per-unit one, and
+        // the script only sets the per-unit one. Without this the unit is armed
+        // and never fires.
+        if self.state.breakpoints_enabled {
+            self.update_trapen(ocd::trapen::HWBP, 0)?;
+        }
+
+        Ok(())
+    }
+
+    fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        self.interface.clear_hw_breakpoint(unit_index)?;
+        self.state.hw_breakpoints[unit_index] = None;
+
+        Ok(())
+    }
+
+    fn registers(&self) -> &'static CoreRegisters {
+        &AVR_CORE_REGISTERS
+    }
+
+    fn program_counter(&self) -> &'static CoreRegister {
+        &PC
+    }
+
+    fn frame_pointer(&self) -> &'static CoreRegister {
+        &FP
+    }
+
+    fn stack_pointer(&self) -> &'static CoreRegister {
+        &SP
+    }
+
+    /// The program counter, because an AVR has no return address register.
+    ///
+    /// `call` pushes the return address onto the stack, so there is nothing to
+    /// return here. No register carries the return address role, which is what
+    /// the unwinder looks at, so this only stands in for callers that ask for a
+    /// register and get one they cannot use.
+    fn return_address(&self) -> &'static CoreRegister {
+        &PC
+    }
+
+    fn hw_breakpoints_enabled(&self) -> bool {
+        self.state.breakpoints_enabled
+    }
+
+    fn architecture(&self) -> Architecture {
+        Architecture::Avr
+    }
+
+    fn core_type(&self) -> CoreType {
+        CoreType::Avr
+    }
+
+    fn instruction_set(&mut self) -> Result<InstructionSet, Error> {
+        Ok(InstructionSet::Avr)
+    }
+
+    fn fpu_support(&mut self) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    fn floating_point_register_count(&mut self) -> Result<usize, Error> {
+        Ok(0)
+    }
+
+    /// Not supported, and not needed. `reset_and_halt` stops the core at the
+    /// reset vector on its own.
+    fn reset_catch_set(&mut self) -> Result<(), Error> {
+        Err(Error::NotImplemented("reset catch on AVR"))
+    }
+
+    /// Not supported. See [`CoreInterface::reset_catch_set`].
+    fn reset_catch_clear(&mut self) -> Result<(), Error> {
+        Err(Error::NotImplemented("reset catch on AVR"))
+    }
+
+    fn debug_core_stop(&mut self) -> Result<(), Error> {
+        Ok(self.interface.close()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The core counts instruction words and everything above it counts bytes.
+    /// These are the two directions of that, and both were seen on hardware.
+    #[test]
+    fn program_counter_addresses_convert_between_words_and_bytes() {
+        // level2 of the test firmware, at word 0x00c4 and byte 0x188.
+        assert_eq!(Avr::word_to_byte_address(0x00c4), 0x188);
+        assert_eq!(Avr::byte_to_word_address(0x188), 0x00c4);
+
+        // The reset vector.
+        assert_eq!(Avr::word_to_byte_address(0), 0);
+        assert_eq!(Avr::byte_to_word_address(0), 0);
+
+        // The last instruction of a 128 KiB part.
+        assert_eq!(Avr::word_to_byte_address(0xFFFF), 0x1_FFFE);
+        assert_eq!(Avr::byte_to_word_address(0x1_FFFE), 0xFFFF);
+    }
+
+    /// Instructions are always at even addresses, so an odd byte address cannot
+    /// name one and rounds down to the instruction it falls inside.
+    #[test]
+    fn odd_byte_addresses_round_down_to_an_instruction() {
+        assert_eq!(Avr::byte_to_word_address(0x189), 0x00c4);
+    }
+
+    /// Every value here was read out of `CAUSE` after triggering the cause on a
+    /// part.
+    #[test]
+    fn the_measured_halt_causes_map_to_a_reason() {
+        assert_eq!(Avr::halt_reason(0x0044, false), HaltReason::Request);
+        assert_eq!(
+            Avr::halt_reason(0x2004, false),
+            HaltReason::Breakpoint(BreakpointCause::Software)
+        );
+        assert_eq!(Avr::halt_reason(0x0084, false), HaltReason::Request);
+    }
+
+    /// Breakpoint unit 0 and a finished step set the same bit, so only the
+    /// caller's intent tells them apart.
+    #[test]
+    fn a_step_and_breakpoint_zero_are_told_apart_by_intent() {
+        assert_eq!(Avr::halt_reason(0x0104, true), HaltReason::Step);
+        assert_eq!(
+            Avr::halt_reason(0x0104, false),
+            HaltReason::Breakpoint(BreakpointCause::Hardware)
+        );
+    }
+
+    /// A fresh core has both units free and hardware breakpoints off.
+    #[test]
+    fn a_fresh_state_has_no_breakpoints() {
+        let state = AvrCoreState::new();
+
+        assert_eq!(state.hw_breakpoints, [None, None]);
+        assert!(!state.breakpoints_enabled);
+        assert!(!state.expecting_step);
+    }
+}
