@@ -219,10 +219,16 @@ impl Pickit {
     pub fn run(&mut self, name: ScriptName, params: Params<'_>) -> Result<Response, PickitError> {
         self.check_ready()?;
 
+        tracing::debug!(script = ?name, "running script");
+
         let script = Self::lookup(&self.scripts, name)?;
         let result = self.transport.command(script.bytes(), params);
         let response = self.finish(result)?;
-        response.check()?;
+
+        if let Err(err) = response.check() {
+            tracing::debug!(script = ?name, error = &err as &dyn std::error::Error, "script failed");
+            return Err(err);
+        }
 
         Ok(response)
     }
