@@ -4,11 +4,15 @@
 //! that Microchip publishes per device in the tool pack, next to a
 //! `ri4command` value that hints at the transfer type the blob was written for.
 //!
-//! probe-rs does not ship those blobs yet. [`ScriptSource`] is the seam where
-//! they arrive. An implementation can embed them, index a downloaded pack from
-//! a user cache, or hand out fixtures in a test.
+//! [`AvrFamily`] is the built-in source. It carries the blobs for the two AVR
+//! families this driver supports. [`ScriptSource`] is the seam, so another
+//! implementation can index a downloaded pack from a user cache or hand out
+//! fixtures in a test.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+use super::blobs;
 
 /// Bit 31 of `ri4command` marks a script that moves data over the data pipe.
 const RI4_DATA_TRANSFER: u32 = 0x8000_0000;
@@ -27,13 +31,35 @@ const RI4_DATA_TRANSFER: u32 = 0x8000_0000;
 #[derive(Clone, Debug)]
 pub struct Script {
     ri4command: u32,
-    bytes: Vec<u8>,
+    bytes: Cow<'static, [u8]>,
 }
 
 impl Script {
     /// Creates a script from its `ri4command` value and its bytecode.
     pub fn new(ri4command: u32, bytes: Vec<u8>) -> Self {
-        Self { ri4command, bytes }
+        Self {
+            ri4command,
+            bytes: Cow::Owned(bytes),
+        }
+    }
+
+    /// Creates a script that borrows bytecode compiled into the binary.
+    ///
+    /// This is what the built-in tables use, so they cost no allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use probe_rs::probe::pickit::Script;
+    ///
+    /// static EXIT_DEBUG_MODE: Script = Script::from_static(0x0000_0201, &[0x00, 0x00]);
+    /// assert!(!EXIT_DEBUG_MODE.is_data_transfer());
+    /// ```
+    pub const fn from_static(ri4command: u32, bytes: &'static [u8]) -> Self {
+        Self {
+            ri4command,
+            bytes: Cow::Borrowed(bytes),
+        }
     }
 
     /// The bytecode the tool runs.
@@ -57,10 +83,10 @@ impl Script {
 
 /// The scripts this driver uses, named as the tool pack names them.
 ///
-/// The pack holds many more. Most run-control scripts are redundant, because
-/// `ReadMem8` and `WriteMem8` reach any data-space address and the on-chip
-/// debug block is memory mapped, so run control is driven through memory
-/// access instead of through per-operation scripts.
+/// This is every UPDI script the pack ships for the supported parts. Run
+/// control has its own scripts here rather than going through raw writes to
+/// the memory-mapped debug block, because these are the ones that were proven
+/// on hardware.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptName {
     /// Opens a UPDI session for programming. The only safe first operation.
@@ -71,6 +97,20 @@ pub enum ScriptName {
     EnterDebugMode,
     /// Closes a debug session.
     ExitDebugMode,
+    /// Enters programming mode with a high-voltage pulse.
+    EnterProgModeHvSp,
+    /// Enters programming mode with a high-voltage pulse and a reset.
+    EnterProgModeHvSpRst,
+    /// Enters programming mode with a high voltage pulse while the operator
+    /// power-cycles the target.
+    EnterProgModeHvUpt,
+    /// Enters debug mode with a high-voltage pulse.
+    EnterDebugModeHvSp,
+    /// Enters debug mode with a high-voltage pulse and a reset.
+    EnterDebugModeHvSpRst,
+    /// Enters debug mode with a high-voltage pulse while the operator
+    /// power-cycles the target.
+    EnterDebugModeHvUpt,
     /// Sets the UPDI clock of the tool in kHz. Takes one word.
     SetSpeed,
     /// Reads the device signature. Returns its result inline.
@@ -99,6 +139,14 @@ pub enum ScriptName {
     ReadConfigmem,
     /// Writes the configuration memory. Takes an address and a length.
     WriteConfigmem,
+    /// Reads a fuse. Takes an address and a length.
+    ReadConfigmemFuse,
+    /// Writes a fuse. Takes an address and a length.
+    WriteConfigmemFuse,
+    /// Reads the lock bits. Takes an address and a length.
+    ReadConfigmemLock,
+    /// Writes the lock bits. Takes an address and a length.
+    WriteConfigmemLock,
     /// Reads the user row. Takes an address and a length.
     ReadIdMem,
     /// Writes the user row. Takes an address and a length.
@@ -107,9 +155,78 @@ pub enum ScriptName {
     ReadCsReg,
     /// Writes a UPDI control and status register. Takes two bytes.
     WriteCsReg,
+    /// Stops the core.
+    Halt,
+    /// Starts the core.
+    Run,
+    /// Executes one instruction.
+    SingleStep,
+    /// Reports whether the core is stopped. Returns its result inline.
+    GetHaltStatus,
+    /// Reads the program counter. Returns its result inline.
+    GetPc,
+    /// Writes the program counter. Takes the new value.
+    SetPc,
+    /// Arms a hardware breakpoint. Takes the address.
+    SetHwBp,
+    /// Disarms a hardware breakpoint.
+    ClearHwBp,
+    /// Resets the core and stops it at the reset vector.
+    DebugReset,
+    /// Asserts reset and keeps it asserted.
+    HoldInReset,
+    /// Releases a reset asserted by [`ScriptName::HoldInReset`].
+    ReleaseFromReset,
 }
 
 impl ScriptName {
+    /// Every script name, in declaration order.
+    pub const ALL: [ScriptName; 43] = [
+        ScriptName::EnterProgMode,
+        ScriptName::ExitProgMode,
+        ScriptName::EnterDebugMode,
+        ScriptName::ExitDebugMode,
+        ScriptName::EnterProgModeHvSp,
+        ScriptName::EnterProgModeHvSpRst,
+        ScriptName::EnterProgModeHvUpt,
+        ScriptName::EnterDebugModeHvSp,
+        ScriptName::EnterDebugModeHvSpRst,
+        ScriptName::EnterDebugModeHvUpt,
+        ScriptName::SetSpeed,
+        ScriptName::GetDeviceId,
+        ScriptName::ReadSib,
+        ScriptName::EraseChip,
+        ScriptName::ReadMem8,
+        ScriptName::WriteMem8,
+        ScriptName::ReadMem16,
+        ScriptName::WriteMem16,
+        ScriptName::ReadProgmem,
+        ScriptName::WriteProgmem,
+        ScriptName::ReadDataEeMem,
+        ScriptName::WriteDataEeMem,
+        ScriptName::ReadConfigmem,
+        ScriptName::WriteConfigmem,
+        ScriptName::ReadConfigmemFuse,
+        ScriptName::WriteConfigmemFuse,
+        ScriptName::ReadConfigmemLock,
+        ScriptName::WriteConfigmemLock,
+        ScriptName::ReadIdMem,
+        ScriptName::WriteIdMem,
+        ScriptName::ReadCsReg,
+        ScriptName::WriteCsReg,
+        ScriptName::Halt,
+        ScriptName::Run,
+        ScriptName::SingleStep,
+        ScriptName::GetHaltStatus,
+        ScriptName::GetPc,
+        ScriptName::SetPc,
+        ScriptName::SetHwBp,
+        ScriptName::ClearHwBp,
+        ScriptName::DebugReset,
+        ScriptName::HoldInReset,
+        ScriptName::ReleaseFromReset,
+    ];
+
     /// The name of the script in the tool pack.
     ///
     /// # Examples
@@ -125,6 +242,12 @@ impl ScriptName {
             ScriptName::ExitProgMode => "ExitProgMode_UPDI",
             ScriptName::EnterDebugMode => "EnterDebugMode_UPDI",
             ScriptName::ExitDebugMode => "ExitDebugMode_UPDI",
+            ScriptName::EnterProgModeHvSp => "EnterProgModeHvSp_UPDI",
+            ScriptName::EnterProgModeHvSpRst => "EnterProgModeHvSpRst_UPDI",
+            ScriptName::EnterProgModeHvUpt => "EnterProgModeHvUpt_UPDI",
+            ScriptName::EnterDebugModeHvSp => "EnterDebugModeHvSp_UPDI",
+            ScriptName::EnterDebugModeHvSpRst => "EnterDebugModeHvSpRst_UPDI",
+            ScriptName::EnterDebugModeHvUpt => "EnterDebugModeHvUpt_UPDI",
             ScriptName::SetSpeed => "SetSpeed_UPDI",
             ScriptName::GetDeviceId => "GetDeviceID_UPDI",
             ScriptName::ReadSib => "ReadSIB_UPDI",
@@ -139,10 +262,25 @@ impl ScriptName {
             ScriptName::WriteDataEeMem => "WriteDataEEmem_UPDI",
             ScriptName::ReadConfigmem => "ReadConfigmem_UPDI",
             ScriptName::WriteConfigmem => "WriteConfigmem_UPDI",
+            ScriptName::ReadConfigmemFuse => "ReadConfigmemFuse_UPDI",
+            ScriptName::WriteConfigmemFuse => "WriteConfigmemFuse_UPDI",
+            ScriptName::ReadConfigmemLock => "ReadConfigmemLock_UPDI",
+            ScriptName::WriteConfigmemLock => "WriteConfigmemLock_UPDI",
             ScriptName::ReadIdMem => "ReadIDmem_UPDI",
             ScriptName::WriteIdMem => "WriteIDmem_UPDI",
             ScriptName::ReadCsReg => "ReadCSreg_UPDI",
             ScriptName::WriteCsReg => "WriteCSreg_UPDI",
+            ScriptName::Halt => "Halt_UPDI",
+            ScriptName::Run => "Run_UPDI",
+            ScriptName::SingleStep => "SingleStep_UPDI",
+            ScriptName::GetHaltStatus => "GetHaltStatus_UPDI",
+            ScriptName::GetPc => "GetPC_UPDI",
+            ScriptName::SetPc => "SetPC_UPDI",
+            ScriptName::SetHwBp => "SetHWBP_UPDI",
+            ScriptName::ClearHwBp => "ClearHWBP_UPDI",
+            ScriptName::DebugReset => "DebugReset_UPDI",
+            ScriptName::HoldInReset => "HoldInReset_UPDI",
+            ScriptName::ReleaseFromReset => "ReleaseFromReset_UPDI",
         }
     }
 }
@@ -155,12 +293,50 @@ impl std::fmt::Display for ScriptName {
 
 /// Where the driver looks up the script blobs for one target device.
 ///
-/// probe-rs does not ship Microchip's blobs, so nothing in this crate
-/// implements this trait yet. Provide an implementation to give the driver
-/// something to run.
+/// [`AvrFamily`] implements this with the blobs that ship with probe-rs.
+/// Implement it yourself to run blobs from somewhere else, such as a tool pack
+/// the user downloaded.
 pub trait ScriptSource: Send + std::fmt::Debug {
     /// Returns the script for `name`, or `None` when this source does not have it.
     fn script(&self, name: ScriptName) -> Option<&Script>;
+}
+
+/// The AVR families probe-rs ships script blobs for.
+///
+/// Two tables cover every supported part. Eleven of the 43 scripts differ
+/// between the families, because the two use a different NVM controller
+/// generation and a different on-chip debug version. The rest are identical.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::str::FromStr;
+///
+/// use probe_rs::probe::pickit::{AvrFamily, Pickit};
+/// use probe_rs::probe::DebugProbeSelector;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let selector = DebugProbeSelector::from_str("04d8:9054")?;
+/// let mut pickit = Pickit::open(&selector)?;
+/// pickit.set_scripts(Box::new(AvrFamily::Dx));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvrFamily {
+    /// AVR Dx series parts, which report on-chip debug version 1.
+    Dx,
+    /// tiny 0-series and 1-series parts, which report on-chip debug version 0.
+    Tiny0,
+}
+
+impl ScriptSource for AvrFamily {
+    fn script(&self, name: ScriptName) -> Option<&Script> {
+        Some(match self {
+            AvrFamily::Dx => blobs::dx(name),
+            AvrFamily::Tiny0 => blobs::tiny0(name),
+        })
+    }
 }
 
 /// A [`ScriptSource`] backed by a map.
@@ -196,5 +372,62 @@ impl ScriptTable {
 impl ScriptSource for ScriptTable {
     fn script(&self, name: ScriptName) -> Option<&Script> {
         self.scripts.get(&name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both tables must answer for every name, or a script is missing.
+    #[test]
+    fn every_name_resolves_in_both_families() {
+        for name in ScriptName::ALL {
+            for family in [AvrFamily::Dx, AvrFamily::Tiny0] {
+                let script = family.script(name).unwrap();
+                assert!(!script.bytes().is_empty(), "{family:?} {name} is empty");
+            }
+        }
+    }
+
+    #[test]
+    fn families_agree_on_ri4command() {
+        for name in ScriptName::ALL {
+            let dx = AvrFamily::Dx.script(name).unwrap();
+            let tiny0 = AvrFamily::Tiny0.script(name).unwrap();
+
+            assert_eq!(dx.ri4command(), tiny0.ri4command(), "{name}");
+        }
+    }
+
+    /// The top two bits of `ri4command` give the transfer direction. Only the
+    /// read and write scripts move bulk data, so only those may set them.
+    #[test]
+    fn ri4command_direction_matches_the_operation() {
+        for name in ScriptName::ALL {
+            let script = AvrFamily::Dx.script(name).unwrap();
+            let pack_name = name.as_str();
+
+            let expected = if pack_name.starts_with("Read") {
+                0x8000_0000
+            } else if pack_name.starts_with("Write") {
+                0xc000_0000
+            } else {
+                0
+            };
+
+            assert_eq!(script.ri4command() & 0xc000_0000, expected, "{name}");
+            assert_eq!(script.is_data_transfer(), expected != 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn names_are_unique() {
+        let mut names: Vec<&str> = ScriptName::ALL.iter().map(|n| n.as_str()).collect();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+
+        assert_eq!(names.len(), count);
     }
 }

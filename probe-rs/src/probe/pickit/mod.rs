@@ -40,12 +40,13 @@ use nusb::{DeviceInfo, Interface, MaybeFuture};
 
 use crate::probe::{ProbeCreationError, ProbeError};
 
+mod blobs;
 mod protocol;
 mod scripts;
 mod session;
 
 pub use self::protocol::{MAX_MESSAGE_LEN, Params, Response};
-pub use self::scripts::{Script, ScriptName, ScriptSource, ScriptTable};
+pub use self::scripts::{AvrFamily, Script, ScriptName, ScriptSource, ScriptTable};
 pub use self::session::{Pickit, SessionState};
 
 /// Microchip's USB vendor id.
