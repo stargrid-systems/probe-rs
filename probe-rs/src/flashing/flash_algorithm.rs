@@ -200,6 +200,8 @@ impl FlashAlgorithm {
 
     const XTENSA_FLASH_BLOB_HEADER: [u32; 0] = [];
 
+    const AVR_FLASH_BLOB_HEADER: [u32; 0] = [];
+
     /// When the target architecture is not known, and we need to allocate space for the header,
     /// this function returns the maximum size of the header of supported architectures.
     pub fn get_max_algorithm_header_size() -> u64 {
@@ -222,6 +224,7 @@ impl FlashAlgorithm {
             Self::algorithm_header(CoreType::Riscv64, Endian::Little),
             Self::algorithm_header(CoreType::Xtensa, Endian::Big),
             Self::algorithm_header(CoreType::Xtensa, Endian::Little),
+            Self::algorithm_header(CoreType::Avr, Endian::Little),
         ];
 
         algos.iter().copied().map(size_of_val).max().unwrap() as u64
@@ -245,6 +248,7 @@ impl FlashAlgorithm {
             },
             CoreType::Riscv | CoreType::Riscv64 => &Self::RISCV_FLASH_BLOB_HEADER,
             CoreType::Xtensa => &Self::XTENSA_FLASH_BLOB_HEADER,
+            CoreType::Avr => &Self::AVR_FLASH_BLOB_HEADER,
         }
     }
 
@@ -253,6 +257,8 @@ impl FlashAlgorithm {
             Architecture::Arm => 8,
             Architecture::Riscv => 16,
             Architecture::Xtensa => 16,
+            // AVR is byte addressed and has no stack alignment requirement beyond that.
+            Architecture::Avr => 2,
         }
     }
 

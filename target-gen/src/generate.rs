@@ -6,9 +6,9 @@ use jep106::JEP106Code;
 use probe_rs::config::Registry;
 use probe_rs::flashing::FlashAlgorithm;
 use probe_rs_target::{
-    Architecture, ArmCoreAccessOptions, Chip, ChipFamily, Core as ProbeCore, CoreAccessOptions,
-    CoreType, GenericRegion, MemoryAccess, MemoryRegion, NvmRegion, RamRegion, RawFlashAlgorithm,
-    RiscvCoreAccessOptions, TargetDescriptionSource, XtensaCoreAccessOptions,
+    Architecture, ArmCoreAccessOptions, AvrCoreAccessOptions, Chip, ChipFamily, Core as ProbeCore,
+    CoreAccessOptions, CoreType, GenericRegion, MemoryAccess, MemoryRegion, NvmRegion, RamRegion,
+    RawFlashAlgorithm, RiscvCoreAccessOptions, TargetDescriptionSource, XtensaCoreAccessOptions,
 };
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -222,6 +222,7 @@ fn create_core(processor: &Processor) -> Result<ProbeCore> {
             Architecture::Xtensa => {
                 CoreAccessOptions::Xtensa(XtensaCoreAccessOptions { jtag_tap: None })
             }
+            Architecture::Avr => CoreAccessOptions::Avr(AvrCoreAccessOptions {}),
         },
     })
 }

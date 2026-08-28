@@ -533,6 +533,7 @@ impl CoreRegisters {
                 }
             }
             CoreType::Xtensa => &XTENSA_CORE_REGISTERS,
+            CoreType::Avr => todo!("AVR register descriptions are not implemented yet"),
         }
     }
 

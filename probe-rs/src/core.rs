@@ -2,6 +2,7 @@ use crate::{
     CoreType, Endian, InstructionSet, MemoryInterface, Target,
     architecture::{
         arm::sequences::{ArmDebugSequence, DefaultArmSequence},
+        avr::sequences::{AvrDebugSequence, DefaultAvrSequence},
         riscv::sequences::{DefaultRiscvSequence, RiscvDebugSequence},
         xtensa::sequences::{DefaultXtensaSequence, XtensaDebugSequence},
     },
@@ -11,7 +12,8 @@ use crate::{
 };
 pub use probe_rs_target::{Architecture, CoreAccessOptions};
 use probe_rs_target::{
-    ArmCoreAccessOptions, MemoryRegion, RiscvCoreAccessOptions, XtensaCoreAccessOptions,
+    ArmCoreAccessOptions, AvrCoreAccessOptions, MemoryRegion, RiscvCoreAccessOptions,
+    XtensaCoreAccessOptions,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -699,6 +701,10 @@ pub enum ResolvedCoreOptions {
         sequence: Arc<dyn XtensaDebugSequence>,
         options: XtensaCoreAccessOptions,
     },
+    Avr {
+        sequence: Arc<dyn AvrDebugSequence>,
+        options: AvrCoreAccessOptions,
+    },
 }
 
 impl ResolvedCoreOptions {
@@ -728,6 +734,13 @@ impl ResolvedCoreOptions {
                 };
                 Self::Xtensa { sequence, options }
             }
+            CoreAccessOptions::Avr(options) => {
+                let sequence = match &target.debug_sequence {
+                    DebugSequence::Avr(s) => s.clone(),
+                    _ => DefaultAvrSequence::create(),
+                };
+                Self::Avr { sequence, options }
+            }
         }
     }
 
@@ -736,6 +749,8 @@ impl ResolvedCoreOptions {
             Self::Arm { options, .. } => options.jtag_tap.unwrap_or(0),
             Self::Riscv { options, .. } => options.jtag_tap.unwrap_or(0),
             Self::Xtensa { options, .. } => options.jtag_tap.unwrap_or(0),
+            // AVR is reached over UPDI, which is not a JTAG scan chain.
+            Self::Avr { .. } => 0,
         }
     }
 }
@@ -756,6 +771,11 @@ impl std::fmt::Debug for ResolvedCoreOptions {
             Self::Xtensa { options, .. } => f
                 .debug_struct("Xtensa")
                 .field("sequence", &"<XtensaDebugSequence>")
+                .field("options", options)
+                .finish(),
+            Self::Avr { options, .. } => f
+                .debug_struct("Avr")
+                .field("sequence", &"<AvrDebugSequence>")
                 .field("options", options)
                 .finish(),
         }

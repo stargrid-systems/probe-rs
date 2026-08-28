@@ -332,6 +332,7 @@ impl SpecificCoreState {
             CoreType::Riscv => SpecificCoreState::Riscv(RiscvCoreState::new()),
             CoreType::Riscv64 => SpecificCoreState::Riscv64(RiscvCoreState::new()),
             CoreType::Xtensa => SpecificCoreState::Xtensa(XtensaCoreState::new()),
+            CoreType::Avr => todo!("AVR core support is not implemented yet"),
         }
     }
 

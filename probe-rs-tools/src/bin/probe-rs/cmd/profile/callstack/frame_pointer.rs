@@ -17,6 +17,8 @@ pub(crate) enum FramePointerStackWalkError {
     ReadMemory(#[source] probe_rs::Error),
     #[error("Failed to spill registers")]
     RegisterSpillError(#[source] probe_rs::Error),
+    #[error("Stack walking is not supported for the {0:?} instruction set")]
+    UnsupportedInstructionSet(InstructionSet),
 }
 
 /// Frame record contents for 32-bit cores
@@ -193,6 +195,9 @@ fn read_frame_record_for_core(
                 AdjustedFrameRecord::new_from_frame_record_32(fr, instruction_set, last_pc)
             })
         }
+        InstructionSet::Avr => Err(FramePointerStackWalkError::UnsupportedInstructionSet(
+            instruction_set,
+        )),
     }
 }
 

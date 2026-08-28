@@ -834,6 +834,9 @@ impl Session {
             DebugSequence::Xtensa(xtensa_debug_sequence) => {
                 xtensa_debug_sequence.prepare_running_on_ram(self, vector_table_addr, core_id)
             }
+            DebugSequence::Avr(_) => {
+                Err(crate::Error::NotImplemented("RAM running on AVR targets"))
+            }
         }
     }
 

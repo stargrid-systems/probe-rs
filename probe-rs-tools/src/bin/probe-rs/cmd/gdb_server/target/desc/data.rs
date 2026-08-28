@@ -73,6 +73,7 @@ impl TargetDescription {
             CoreType::Riscv => "riscv:rv32",
             CoreType::Riscv64 => "riscv:rv64",
             CoreType::Xtensa => "xtensa",
+            CoreType::Avr => "avr",
         };
 
         Self {
@@ -261,6 +262,7 @@ pub fn build_target_description(
         },
         CoreType::Riscv | CoreType::Riscv64 => build_riscv_registers(&mut desc, regs),
         CoreType::Xtensa => build_xtensa_registers(&mut desc, regs),
+        CoreType::Avr => panic!("AVR is not supported by the GDB server yet"),
     };
 
     desc
