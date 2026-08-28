@@ -10,6 +10,7 @@ pub mod ftdi;
 pub mod glasgow;
 pub mod jlink;
 pub mod list;
+pub mod pickit;
 pub(crate) mod queue;
 mod selector;
 pub mod sifliuart;

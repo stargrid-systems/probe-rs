@@ -1,0 +1,159 @@
+//! Driver for the MPLAB PICkit script protocol.
+//!
+//! This is the host protocol of the newer Microchip tools, which are the PICkit
+//! Basic, the PICkit 5, and the ICD 5. It is not the EDBG protocol that the
+//! Atmel-ICE and the MPLAB SNAP speak. Microchip does not document it.
+//!
+//! The tool does not expose named operations. It runs a small virtual machine.
+//! The host sends a script, which is a blob of bytecode published by Microchip
+//! for one device and one operation, together with a parameter block. The tool
+//! runs the script against the target and moves bulk data over a second USB
+//! pipe. See [`ScriptSource`] for where the blobs come from.
+//!
+//! This module is the transport only. It does not implement [`DebugProbe`].
+//!
+//! [`DebugProbe`]: crate::probe::DebugProbe
+//!
+//! # Five rules
+//!
+//! The tool firmware has no software recovery from a hang. A hung tool keeps
+//! enumerating on USB while all four bulk endpoints stay silent, and only
+//! removing power brings it back. Every rule below was learned by hanging a
+//! real tool, so prevention is the whole strategy. The types in this module
+//! enforce them.
+//!
+//! 1. `EnterProgMode` is the only safe first operation. [`SessionState::Cold`]
+//!    is the state a freshly opened tool is in, and [`Pickit::enter_prog_mode`]
+//!    is the only method that leaves it.
+//! 2. Every write needs a status query between the data phase and the `script
+//!    done` message. The data endpoint is private to the framing module, and
+//!    the one function that writes to it also sends the query.
+//! 3. Every script stream must be torn down on all paths. A guard type sends
+//!    `script done` from its `Drop`, so an early return cannot leak a stream.
+//! 4. Never issue memory access to a locked part. A part that reports itself
+//!    locked moves the session to [`SessionState::Locked`], which rejects reads
+//!    and writes without touching the wire.
+//! 5. On the first timeout the tool is hung. The transport latches a poisoned
+//!    state, and every later call fails immediately. Retrying never helps.
+
+use nusb::{DeviceInfo, Interface, MaybeFuture};
+
+use crate::probe::{ProbeCreationError, ProbeError};
+
+mod protocol;
+mod scripts;
+mod session;
+
+pub use self::protocol::{MAX_MESSAGE_LEN, Params, Response};
+pub use self::scripts::{Script, ScriptName, ScriptSource, ScriptTable};
+pub use self::session::{Pickit, SessionState};
+
+/// Microchip's USB vendor id.
+pub const VENDOR_ID: u16 = 0x04d8;
+
+/// Product ids of a PICkit that runs the MPLAB application firmware.
+///
+/// The tool ships with two firmware personalities and the product id tells you
+/// which one is loaded. Only these three speak this protocol. Ids in the
+/// `0x90ab` to `0x90ae` range are CMSIS-DAP firmware, which probe-rs can drive
+/// for ARM parts but which cannot reach an AVR. Id `0x9057` is the bootloader.
+pub const PRODUCT_IDS: &[u16] = &[0x9054, 0x9055, 0x9056];
+
+/// The USB interface that carries the two bulk pipes.
+///
+/// Interfaces 1 and 2 are the USB to UART feature and are unrelated to
+/// programming.
+const INTERFACE: u8 = 0;
+
+/// Returns true if the device is a PICkit running MPLAB application firmware.
+pub fn is_pickit(device: &DeviceInfo) -> bool {
+    device.vendor_id() == VENDOR_ID && PRODUCT_IDS.contains(&device.product_id())
+}
+
+/// Lists every connected PICkit that speaks this protocol.
+///
+/// # Examples
+///
+/// ```no_run
+/// for device in probe_rs::probe::pickit::list_devices() {
+///     println!("{:?}", device.product_string());
+/// }
+/// ```
+pub fn list_devices() -> Vec<DeviceInfo> {
+    match nusb::list_devices().wait() {
+        Ok(devices) => devices.filter(is_pickit).collect(),
+        Err(err) => {
+            tracing::warn!(
+                error = &err as &dyn std::error::Error,
+                "failed to list USB devices"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Opens the vendor interface of a PICkit.
+fn open_interface(device: &DeviceInfo) -> Result<Interface, ProbeCreationError> {
+    let device = device
+        .open()
+        .wait()
+        .map_err(|e| ProbeCreationError::Usb(e.into()))?;
+
+    device
+        .claim_interface(INTERFACE)
+        .wait()
+        .map_err(|e| ProbeCreationError::Usb(e.into()))
+}
+
+/// An error reported by a PICkit or by this driver.
+#[derive(thiserror::Error, Debug, docsplay::Display)]
+pub enum PickitError {
+    /// USB communication with the PICkit failed.
+    Usb(#[source] std::io::Error),
+
+    /// The PICkit stopped answering. Unplug it and plug it back in, then try again.
+    ///
+    /// There is no software recovery. The firmware believes it is still busy
+    /// with an operation that will never finish, which the solid yellow Status
+    /// LED shows. Only removing power clears it.
+    #[ignore_extra_doc_attributes]
+    Hung,
+
+    /// The PICkit answered with status {0:#x} instead of 0x0d.
+    BadStatus(u32),
+
+    /// The PICkit sent nothing but empty and all-zero packets.
+    NoResponse,
+
+    /// The PICkit sent a response that is too short to decode.
+    ShortResponse,
+
+    /// The message is {0} bytes, which is over the 2048 byte limit.
+    MessageTooLong(usize),
+
+    /// The target is locked. Erase the chip to get access to it again.
+    TargetLocked,
+
+    /// No target found. Check the power supply and the wiring.
+    NoTarget,
+
+    /// The target did not answer when entering debug mode. Check the power supply and the wiring.
+    DebugModeNoTarget,
+
+    /// The script failed with error code {0:#x}.
+    Script(u32),
+
+    /// No session is open. Enter programming mode first.
+    SessionNotOpen,
+
+    /// A session is already open.
+    SessionAlreadyOpen,
+
+    /// No scripts are loaded for the target device.
+    NoScripts,
+
+    /// The loaded scripts have no entry for {0}.
+    ScriptMissing(ScriptName),
+}
+
+impl ProbeError for PickitError {}
