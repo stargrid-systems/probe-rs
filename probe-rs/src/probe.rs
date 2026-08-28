@@ -20,6 +20,9 @@ pub mod wlink;
 use crate::architecture::arm::sequences::{ArmDebugSequence, DefaultArmSequence};
 use crate::architecture::arm::{ArmDebugInterface, ArmError};
 use crate::architecture::arm::{RegisterAddress, SwoAccess, communication_interface::DapProbe};
+use crate::architecture::avr::communication_interface::{
+    AvrCommunicationInterface, AvrDebugInterfaceState, AvrError,
+};
 use crate::architecture::riscv::communication_interface::{RiscvError, RiscvInterfaceBuilder};
 use crate::architecture::xtensa::communication_interface::{
     XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
@@ -56,6 +59,7 @@ static DRIVERS: LazyLock<RwLock<Vec<&'static dyn ProbeFactory>>> = LazyLock::new
         &sifliuart::SifliUartFactory,
         &glasgow::GlasgowFactory,
         &ch347usbjtag::Ch347UsbJtagFactory,
+        &pickit::PickitFactory,
     ];
 
     RwLock::new(probes)
@@ -544,6 +548,27 @@ impl Probe {
         }
     }
 
+    /// Check if the probe has an interface to debug AVR chips.
+    pub fn has_avr_interface(&self) -> bool {
+        self.inner.has_avr_interface()
+    }
+
+    /// Try to get an [`AvrCommunicationInterface`], which can be used to
+    /// communicate with chips using the AVR architecture over UPDI.
+    ///
+    /// The user is responsible for creating and managing the
+    /// [`AvrDebugInterfaceState`] state object.
+    pub fn try_get_avr_interface<'probe>(
+        &'probe mut self,
+        state: &'probe mut AvrDebugInterfaceState,
+    ) -> Result<AvrCommunicationInterface<'probe>, AvrError> {
+        if !self.attached {
+            Err(DebugProbeError::NotAttached.into())
+        } else {
+            self.inner.try_get_avr_interface(state)
+        }
+    }
+
     /// Checks if the probe supports connecting to chips
     /// using the Arm Debug Interface.
     pub fn has_arm_debug_interface(&self) -> bool {
@@ -778,6 +803,23 @@ pub trait DebugProbe: Any + Send + fmt::Debug {
 
     /// Check if the probe offers an interface to debug Xtensa chips.
     fn has_xtensa_interface(&self) -> bool {
+        false
+    }
+
+    /// Get the dedicated interface to debug AVR chips over UPDI. Ensure that the
+    /// probe actually supports this by calling [DebugProbe::has_avr_interface] first.
+    fn try_get_avr_interface<'probe>(
+        &'probe mut self,
+        _state: &'probe mut AvrDebugInterfaceState,
+    ) -> Result<AvrCommunicationInterface<'probe>, AvrError> {
+        Err(DebugProbeError::InterfaceNotAvailable {
+            interface_name: "AVR",
+        }
+        .into())
+    }
+
+    /// Check if the probe offers an interface to debug AVR chips.
+    fn has_avr_interface(&self) -> bool {
         false
     }
 

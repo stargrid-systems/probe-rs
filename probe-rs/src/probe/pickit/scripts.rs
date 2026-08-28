@@ -330,6 +330,35 @@ pub enum AvrFamily {
     Tiny0,
 }
 
+impl AvrFamily {
+    /// Picks the script table that covers a device, by its name.
+    ///
+    /// The two tables differ only in the NVM and debug scripts, and that split
+    /// follows the part family. The target description has no field that says
+    /// which family a part belongs to, so the name is what there is to go on.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use probe_rs::probe::pickit::AvrFamily;
+    ///
+    /// assert_eq!(AvrFamily::for_device("AVR128DA64"), Some(AvrFamily::Dx));
+    /// assert_eq!(AvrFamily::for_device("ATtiny406"), Some(AvrFamily::Tiny0));
+    /// assert_eq!(AvrFamily::for_device("STM32F103"), None);
+    /// ```
+    pub fn for_device(name: &str) -> Option<Self> {
+        let name = name.to_ascii_lowercase();
+
+        if name.starts_with("attiny") {
+            Some(AvrFamily::Tiny0)
+        } else if name.starts_with("avr") {
+            Some(AvrFamily::Dx)
+        } else {
+            None
+        }
+    }
+}
+
 impl ScriptSource for AvrFamily {
     fn script(&self, name: ScriptName) -> Option<&Script> {
         Some(match self {
@@ -419,6 +448,15 @@ mod tests {
             assert_eq!(script.ri4command() & 0xc000_0000, expected, "{name}");
             assert_eq!(script.is_data_transfer(), expected != 0, "{name}");
         }
+    }
+
+    #[test]
+    fn the_supported_devices_map_to_a_family() {
+        assert_eq!(AvrFamily::for_device("AVR128DA64"), Some(AvrFamily::Dx));
+        assert_eq!(AvrFamily::for_device("AVR128DB64"), Some(AvrFamily::Dx));
+        assert_eq!(AvrFamily::for_device("ATtiny406"), Some(AvrFamily::Tiny0));
+        assert_eq!(AvrFamily::for_device("attiny1614"), Some(AvrFamily::Tiny0));
+        assert_eq!(AvrFamily::for_device("nRF52840"), None);
     }
 
     #[test]

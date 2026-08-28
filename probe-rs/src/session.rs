@@ -9,6 +9,9 @@ use crate::{
             memory::CoresightComponent,
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
+        avr::communication_interface::{
+            AvrCommunicationInterface, AvrDebugInterfaceState, AvrError,
+        },
         riscv::{
             communication_interface::{
                 RiscvCommunicationInterface, RiscvDebugInterfaceState, RiscvError,
@@ -23,7 +26,7 @@ use crate::{
     core::{Architecture, CombinedCoreState},
     probe::{
         AttachMethod, DebugProbeError, Probe, ProbeCreationError, WireProtocol,
-        fake_probe::FakeProbe, list::Lister,
+        fake_probe::FakeProbe, list::Lister, pickit::AvrFamily,
     },
 };
 use std::ops::DerefMut;
@@ -109,6 +112,9 @@ enum ArchitectureInterface {
         riscv_mem_ap_cores: Vec<Option<(FullyQualifiedApAddress, RiscvDebugInterfaceState)>>,
     },
     Jtag(Probe, Vec<JtagInterface>),
+    /// An AVR reached over UPDI, which is not a JTAG scan chain and has one
+    /// debug module per tool rather than one per TAP.
+    Avr(Probe, AvrDebugInterfaceState),
 }
 
 impl fmt::Debug for ArchitectureInterface {
@@ -121,6 +127,10 @@ impl fmt::Debug for ArchitectureInterface {
             ArchitectureInterface::Jtag(_, ifaces) => f
                 .debug_tuple("ArchitectureInterface::Jtag(..)")
                 .field(ifaces)
+                .finish(),
+            ArchitectureInterface::Avr(_, state) => f
+                .debug_tuple("ArchitectureInterface::Avr(..)")
+                .field(state)
                 .finish(),
         }
     }
@@ -171,6 +181,9 @@ impl ArchitectureInterface {
                     }
                 }
             }
+            // The AVR core is not implemented yet. The communication interface
+            // exists and can be reached through `Session::get_avr_interface`.
+            ArchitectureInterface::Avr(..) => Err(Error::NotImplemented("AVR core debugging")),
         }
     }
 }
@@ -199,6 +212,12 @@ impl Session {
                 )
             })
             .collect();
+
+        // AVR is reached over UPDI, which is neither a DAP nor a JTAG scan chain,
+        // so it needs its own path.
+        if target.default_core().core_type.architecture() == Architecture::Avr {
+            return Self::attach_avr(probe, target, cores);
+        }
 
         // Use ARM DAP path when the target connects via SWD/DAP: either ARM cores or RISC-V cores
         // over mem-AP (e.g. RP235x_riscv).
@@ -417,6 +436,40 @@ impl Session {
         } else {
             Ok(ArchitectureInterface::Arm(interface))
         }
+    }
+
+    /// Opens a UPDI session and identifies the part.
+    ///
+    /// `EnterProgMode` is the only operation that is safe on a tool which has
+    /// not talked to the target yet, so it comes first and the signature read
+    /// follows it.
+    fn attach_avr(
+        mut probe: Probe,
+        target: Target,
+        cores: Vec<CombinedCoreState>,
+    ) -> Result<Self, Error> {
+        // The script tables split by part family, and the target description
+        // has no field for that, so the device name decides.
+        let family = AvrFamily::for_device(&target.name)
+            .ok_or_else(|| Error::Other(format!("{} is not a known AVR family", target.name)))?;
+
+        probe.attach_to_unspecified()?;
+
+        let mut state = AvrDebugInterfaceState::new(family);
+        {
+            let mut interface = probe.try_get_avr_interface(&mut state)?;
+            interface.enter_programming_mode()?;
+
+            let device_id = interface.device_id()?;
+            tracing::info!("Connected to an AVR with signature {device_id}");
+        }
+
+        Ok(Session {
+            target,
+            interfaces: ArchitectureInterface::Avr(probe, state),
+            cores,
+            configured_trace_sink: None,
+        })
     }
 
     fn attach_jtag(
@@ -719,7 +772,9 @@ impl Session {
         let interface = match &mut self.interfaces {
             ArchitectureInterface::Arm(state) => state.deref_mut(),
             ArchitectureInterface::ArmWithRiscv { arm, .. } => arm.deref_mut(),
-            ArchitectureInterface::Jtag(..) => return Err(ArmError::NoArmTarget),
+            ArchitectureInterface::Jtag(..) | ArchitectureInterface::Avr(..) => {
+                return Err(ArmError::NoArmTarget);
+            }
         };
 
         Ok(interface)
@@ -759,7 +814,9 @@ impl Session {
                     Err(RiscvError::NoRiscvTarget.into())
                 }
             }
-            ArchitectureInterface::Arm(_) => Err(RiscvError::NoRiscvTarget.into()),
+            ArchitectureInterface::Arm(_) | ArchitectureInterface::Avr(..) => {
+                Err(RiscvError::NoRiscvTarget.into())
+            }
         }
     }
 
@@ -778,6 +835,18 @@ impl Session {
             }
         }
         Err(XtensaError::NoXtensaTarget.into())
+    }
+
+    /// Get the AVR probe interface.
+    ///
+    /// The session is already open, so the returned interface can read and
+    /// write memory without entering programming mode again.
+    pub fn get_avr_interface(&mut self) -> Result<AvrCommunicationInterface<'_>, Error> {
+        let ArchitectureInterface::Avr(probe, state) = &mut self.interfaces else {
+            return Err(AvrError::NoAvrTarget.into());
+        };
+
+        Ok(probe.try_get_avr_interface(state)?)
     }
 
     #[tracing::instrument(skip_all)]
@@ -861,7 +930,7 @@ impl Session {
         let interface_ref = match &mut self.interfaces {
             ArchitectureInterface::Arm(i) => i.deref_mut(),
             ArchitectureInterface::ArmWithRiscv { arm, .. } => arm.deref_mut(),
-            ArchitectureInterface::Jtag(..) => {
+            ArchitectureInterface::Jtag(..) | ArchitectureInterface::Avr(..) => {
                 return Err(Error::NotImplemented(
                     "Debug Erase Sequence is not implemented for non-ARM targets.",
                 ));
@@ -895,7 +964,7 @@ impl Session {
                         core_state.enable_arm_debug(arm.deref_mut())?;
                     }
                 }
-                ArchitectureInterface::Jtag(..) => {}
+                ArchitectureInterface::Jtag(..) | ArchitectureInterface::Avr(..) => {}
             },
             Err(e) => return Err(Error::Arm(e)),
         }
@@ -1002,6 +1071,7 @@ impl Session {
                     Architecture::Xtensa
                 }
             }
+            ArchitectureInterface::Avr(..) => Architecture::Avr,
         }
     }
 

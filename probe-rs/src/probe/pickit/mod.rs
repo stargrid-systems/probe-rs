@@ -10,7 +10,8 @@
 //! runs the script against the target and moves bulk data over a second USB
 //! pipe. See [`ScriptSource`] for where the blobs come from.
 //!
-//! This module is the transport only. It does not implement [`DebugProbe`].
+//! [`PickitProbe`] is the [`DebugProbe`] implementation. Everything below it
+//! is the transport, which knows nothing about AVR cores.
 //!
 //! [`DebugProbe`]: crate::probe::DebugProbe
 //!
@@ -41,10 +42,12 @@ use nusb::{DeviceInfo, Interface, MaybeFuture};
 use crate::probe::{ProbeCreationError, ProbeError};
 
 mod blobs;
+mod probe;
 mod protocol;
 mod scripts;
 mod session;
 
+pub use self::probe::{PickitFactory, PickitProbe};
 pub use self::protocol::{MAX_MESSAGE_LEN, Params, Response};
 pub use self::scripts::{AvrFamily, Script, ScriptName, ScriptSource, ScriptTable};
 pub use self::session::{Pickit, SessionState};
