@@ -428,6 +428,19 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         self.write(ScriptName::WriteProgmem, tool_address, data)
     }
 
+    /// Erases flash, EEPROM, and the lock bits.
+    ///
+    /// The lock state changes underneath the session, so the tool ends the
+    /// session. A fresh programming session is opened here, which leaves the
+    /// interface usable and the core held in reset. A caller that was debugging
+    /// has to enter debug mode again.
+    pub fn erase_chip(&mut self) -> Result<(), AvrError> {
+        self.probe.erase_chip().map_err(probe_error)?;
+        self.state.device_id = None;
+
+        self.enter_programming_mode()
+    }
+
     /// Switches the open programming session over to debugging.
     ///
     /// This sends the on-chip debug key. It leaves the core running, so a

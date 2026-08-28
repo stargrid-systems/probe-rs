@@ -390,6 +390,32 @@ impl AvrFamily {
             AvrFamily::Tiny0 => 0x0000_8000,
         }
     }
+
+    /// The flash page size of the parts in this family, in bytes.
+    ///
+    /// `WriteProgmem` erases and programs whole pages, and `ReadProgmem`
+    /// steps a page at a time. Neither takes the page size as a parameter,
+    /// because it is baked into the bytecode as an immediate at offset 13.
+    /// The values here are the ones read out of those blobs, so the host and
+    /// the tool cannot disagree.
+    ///
+    /// The target description has nowhere to put this. A page size lives in a
+    /// flash algorithm, and these parts have none.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use probe_rs::probe::pickit::AvrFamily;
+    ///
+    /// assert_eq!(AvrFamily::Dx.flash_page_size(), 512);
+    /// assert_eq!(AvrFamily::Tiny0.flash_page_size(), 64);
+    /// ```
+    pub fn flash_page_size(self) -> u32 {
+        match self {
+            AvrFamily::Dx => 512,
+            AvrFamily::Tiny0 => 64,
+        }
+    }
 }
 
 impl ScriptSource for AvrFamily {
@@ -497,6 +523,31 @@ mod tests {
     fn each_family_pins_its_own_flash_base() {
         assert_eq!(AvrFamily::Dx.flash_base(), 0x0080_0000);
         assert_eq!(AvrFamily::Tiny0.flash_base(), 0x0000_8000);
+    }
+
+    /// The page size the host reports has to be the one the tool uses, and the
+    /// tool takes it from an immediate in `ReadProgmem`. Read that immediate
+    /// back out of the blob so the two cannot drift apart.
+    #[test]
+    fn the_page_size_matches_the_script_bytecode() {
+        for family in [AvrFamily::Dx, AvrFamily::Tiny0] {
+            let bytes = family.script(ScriptName::ReadProgmem).unwrap().bytes();
+
+            // `0x90 0x0f <u32 LE>` loads register 15 with the page size.
+            assert_eq!(&bytes[11..13], &[0x90, 0x0f], "{family:?}");
+            let immediate = u32::from_le_bytes(bytes[13..17].try_into().unwrap());
+
+            assert_eq!(immediate, family.flash_page_size(), "{family:?}");
+        }
+    }
+
+    /// A page size that is not a power of two would break the page alignment
+    /// the flash driver does with a mask.
+    #[test]
+    fn page_sizes_are_powers_of_two() {
+        for family in [AvrFamily::Dx, AvrFamily::Tiny0] {
+            assert!(family.flash_page_size().is_power_of_two(), "{family:?}");
+        }
     }
 
     #[test]

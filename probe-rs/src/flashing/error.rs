@@ -57,6 +57,18 @@ pub enum FlashError {
         #[source]
         source: Box<dyn std::error::Error + 'static + Send + Sync>,
     },
+    /// The driver in charge of a region cannot program it.
+    ///
+    /// The region is non-volatile and the driver owns it, but the driver has no way
+    /// to write it. AVR configuration memory is like this: a chip erase clears it,
+    /// but programming it needs scripts this driver does not use.
+    #[error("The {driver} driver cannot program the region {range:#010x?}.")]
+    RegionNotProgrammable {
+        /// The name of the driver.
+        driver: String,
+        /// The region that cannot be programmed.
+        range: Range<u64>,
+    },
     /// Initializing the flash algorithm failed.
     #[error("The initialization of the flash algorithm failed.")]
     Init(#[source] Box<dyn std::error::Error + 'static + Send + Sync>),

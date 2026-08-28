@@ -42,6 +42,7 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
+mod avr;
 mod builder;
 mod download;
 mod encoder;

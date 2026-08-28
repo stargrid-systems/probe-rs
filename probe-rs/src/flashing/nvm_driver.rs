@@ -1,8 +1,8 @@
-use probe_rs_target::{NvmRegion, PageInfo, SectorInfo, TransferEncoding};
+use probe_rs_target::{Architecture, NvmRegion, PageInfo, SectorInfo, TransferEncoding};
 use std::time::Instant;
 
 use crate::flashing::encoder::FlashEncoder;
-use crate::flashing::{FlashError, FlashLayout, FlashProgress, FlashSector};
+use crate::flashing::{FlashError, FlashLayout, FlashProgress, FlashSector, avr};
 use crate::session::Session;
 
 /// Flash data
@@ -292,14 +292,20 @@ pub trait NvmDriver {
 /// non-volatile memory sequencing, or because the core cannot execute from RAM. Those
 /// targets get a driver here, and then they need no flash algorithm.
 ///
-/// Returns `None` when the target needs a flash algorithm, which is the case for every
-/// target today.
+/// The architecture decides. AVR is programmed by the probe, so it gets a driver.
+/// Every other architecture returns `None` and takes the flash algorithm path.
+///
+/// The region is not used for AVR. One driver covers every non-volatile region of
+/// the part, so the regions share a plan and a chip erase runs once for all of them.
 pub(super) fn driver_for_region(
-    _session: &mut Session,
+    session: &mut Session,
     _region: &NvmRegion,
     _core_index: usize,
 ) -> Option<Box<dyn NvmDriver>> {
-    None
+    match session.architecture() {
+        Architecture::Avr => avr::driver_for(session),
+        _ => None,
+    }
 }
 
 /// Compares the staged data of `regions` against what the target reports.
@@ -372,7 +378,7 @@ pub(super) fn fill_pages(
 
 #[cfg(all(test, feature = "builtin-targets"))]
 mod tests {
-    use probe_rs_target::{PageInfo, SectorInfo};
+    use probe_rs_target::{MemoryRegion, PageInfo, SectorInfo};
 
     use super::*;
     use crate::probe::Probe;
@@ -501,6 +507,22 @@ mod tests {
             address: 0,
             size: SECTOR_SIZE,
         }]
+    }
+
+    /// Every architecture except AVR keeps the flash algorithm path, so nothing
+    /// but AVR may get a driver here.
+    #[test]
+    fn a_non_avr_target_has_no_driver() {
+        let mut session = fake_session();
+        let region = session
+            .target()
+            .memory_map
+            .iter()
+            .find_map(MemoryRegion::as_nvm_region)
+            .expect("nrf51822 has flash")
+            .clone();
+
+        assert!(driver_for_region(&mut session, &region, 0).is_none());
     }
 
     #[test]
