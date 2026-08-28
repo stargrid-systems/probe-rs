@@ -97,10 +97,6 @@ impl Flasher {
         Ok(())
     }
 
-    pub(super) fn flash_algorithm(&self) -> &FlashAlgorithm {
-        &self.flash_algorithm
-    }
-
     fn load(&mut self, session: &mut Session) -> Result<(), FlashError> {
         tracing::debug!("Initializing the flash algorithm.");
         let algo = &self.flash_algorithm;
@@ -514,6 +510,27 @@ impl NvmDriver for Flasher {
         result
     }
 
+    fn erase_selected_sectors(
+        &mut self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+        sectors: &[FlashSector],
+    ) -> Result<(), FlashError> {
+        self.run_erase(session, progress, |active| {
+            for sector in sectors {
+                tracing::debug!(
+                    "    sector: {:#010x}-{:#010x} ({} bytes)",
+                    sector.address(),
+                    sector.address() + sector.size(),
+                    sector.size()
+                );
+
+                active.erase_sector(sector)?;
+            }
+            Ok(())
+        })
+    }
+
     fn program_pages(
         &mut self,
         session: &mut Session,
@@ -569,6 +586,27 @@ impl NvmDriver for Flasher {
         }
 
         result
+    }
+
+    fn blank_check(
+        &mut self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+        sectors: &[FlashSector],
+    ) -> Result<(), FlashError> {
+        self.run_verify(session, progress, |active| {
+            for sector in sectors {
+                tracing::debug!(
+                    "    sector: {:#010x}-{:#010x} ({} bytes)",
+                    sector.address(),
+                    sector.address() + sector.size(),
+                    sector.size()
+                );
+
+                active.blank_check(sector)?;
+            }
+            Ok(())
+        })
     }
 }
 

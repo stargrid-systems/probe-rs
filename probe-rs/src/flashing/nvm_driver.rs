@@ -2,7 +2,7 @@ use probe_rs_target::{NvmRegion, PageInfo, SectorInfo, TransferEncoding};
 use std::time::Instant;
 
 use crate::flashing::encoder::FlashEncoder;
-use crate::flashing::{FlashError, FlashLayout, FlashProgress};
+use crate::flashing::{FlashError, FlashLayout, FlashProgress, FlashSector};
 use crate::session::Session;
 
 /// Flash data
@@ -184,6 +184,26 @@ pub trait NvmDriver {
         regions: &mut [LoadedRegion],
     ) -> Result<(), FlashError>;
 
+    /// Erases exactly the sectors listed in `sectors`.
+    ///
+    /// This backs the standalone erase commands, where the sectors come from the caller's
+    /// address range instead of from staged data. The caller takes the sectors from
+    /// [`geometry`](Self::geometry), so a driver only ever sees sectors it owns.
+    ///
+    /// There is no sensible generic implementation, so the default reports that this
+    /// driver cannot erase a chosen set of sectors.
+    fn erase_selected_sectors(
+        &mut self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+        sectors: &[FlashSector],
+    ) -> Result<(), FlashError> {
+        let _ = (session, progress, sectors);
+        Err(FlashError::SectorEraseNotSupported {
+            name: self.name().to_string(),
+        })
+    }
+
     /// Programs every page of `regions`.
     ///
     /// `double_buffering` is the user's preference. A driver that does not support it
@@ -233,6 +253,35 @@ pub trait NvmDriver {
         }
 
         result
+    }
+
+    /// Checks that every sector in `sectors` reads back as erased.
+    ///
+    /// The default reads the sectors through [`with_reader`](Self::with_reader) and compares
+    /// every byte against [`NvmGeometry::erased_byte_value`]. Drivers with a dedicated blank
+    /// check on the target override this.
+    fn blank_check(
+        &mut self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+        sectors: &[FlashSector],
+    ) -> Result<(), FlashError> {
+        let _ = progress;
+        let erased_byte_value = self.geometry().erased_byte_value();
+
+        self.with_reader(session, &mut |reader| {
+            for sector in sectors {
+                let mut data = vec![0; sector.size() as usize];
+                reader.read(sector.address(), &mut data)?;
+
+                if !data.iter().all(|v| *v == erased_byte_value) {
+                    return Err(FlashError::ChipEraseFailed {
+                        source: "Not all sectors were erased".into(),
+                    });
+                }
+            }
+            Ok(())
+        })
     }
 }
 
@@ -319,4 +368,177 @@ pub(super) fn fill_pages(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "builtin-targets"))]
+mod tests {
+    use probe_rs_target::{PageInfo, SectorInfo};
+
+    use super::*;
+    use crate::probe::Probe;
+    use crate::probe::fake_probe::FakeProbe;
+    use crate::{Permissions, Session};
+
+    const SECTOR_SIZE: u64 = 0x400;
+
+    struct TestGeometry;
+
+    impl NvmGeometry for TestGeometry {
+        fn sector_info(&self, address: u64) -> Option<SectorInfo> {
+            Some(SectorInfo {
+                base_address: address & !(SECTOR_SIZE - 1),
+                size: SECTOR_SIZE,
+            })
+        }
+
+        fn page_info(&self, address: u64) -> Option<PageInfo> {
+            Some(PageInfo {
+                base_address: address & !0xff,
+                size: 0x100,
+            })
+        }
+
+        fn sectors(&self) -> Box<dyn Iterator<Item = SectorInfo> + '_> {
+            Box::new(std::iter::once(SectorInfo {
+                base_address: 0,
+                size: SECTOR_SIZE,
+            }))
+        }
+
+        fn pages(&self) -> Box<dyn Iterator<Item = PageInfo> + '_> {
+            Box::new(std::iter::empty())
+        }
+
+        fn erased_byte_value(&self) -> u8 {
+            0xff
+        }
+    }
+
+    /// Serves a fixed image starting at address 0.
+    struct ImageReader<'a>(&'a [u8]);
+
+    impl NvmReader for ImageReader<'_> {
+        fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), FlashError> {
+            let start = address as usize;
+            data.copy_from_slice(&self.0[start..][..data.len()]);
+            Ok(())
+        }
+    }
+
+    /// A driver that only knows how to read back a fixed image.
+    ///
+    /// Everything else stays on the trait's default implementation, which is what these
+    /// tests exercise.
+    struct ImageDriver {
+        geometry: TestGeometry,
+        image: Vec<u8>,
+    }
+
+    impl NvmDriver for ImageDriver {
+        fn name(&self) -> &str {
+            "image"
+        }
+
+        fn geometry(&self) -> &dyn NvmGeometry {
+            &self.geometry
+        }
+
+        fn is_chip_erase_supported(&self, _session: &Session) -> bool {
+            false
+        }
+
+        fn erase_all(
+            &mut self,
+            _session: &mut Session,
+            _progress: &mut FlashProgress<'_>,
+        ) -> Result<(), FlashError> {
+            Ok(())
+        }
+
+        fn erase_sectors(
+            &mut self,
+            _session: &mut Session,
+            _progress: &mut FlashProgress<'_>,
+            _regions: &mut [LoadedRegion],
+        ) -> Result<(), FlashError> {
+            Ok(())
+        }
+
+        fn program_pages(
+            &mut self,
+            _session: &mut Session,
+            _progress: &mut FlashProgress<'_>,
+            _regions: &mut [LoadedRegion],
+            _double_buffering: bool,
+        ) -> Result<(), FlashError> {
+            Ok(())
+        }
+
+        fn with_reader(
+            &mut self,
+            _session: &mut Session,
+            f: &mut dyn FnMut(&mut dyn NvmReader) -> Result<(), FlashError>,
+        ) -> Result<(), FlashError> {
+            f(&mut ImageReader(&self.image))
+        }
+    }
+
+    fn fake_session() -> Session {
+        Probe::from_specific_probe(Box::new(FakeProbe::with_mocked_core()))
+            .attach("nrf51822_xxAC", Permissions::default())
+            .expect("Failed to attach with 'fake' probe.")
+    }
+
+    fn driver_with(image: Vec<u8>) -> ImageDriver {
+        ImageDriver {
+            geometry: TestGeometry,
+            image,
+        }
+    }
+
+    fn one_sector() -> Vec<FlashSector> {
+        vec![FlashSector {
+            address: 0,
+            size: SECTOR_SIZE,
+        }]
+    }
+
+    #[test]
+    fn default_blank_check_accepts_erased_flash() {
+        let mut session = fake_session();
+        let mut driver = driver_with(vec![0xff; SECTOR_SIZE as usize]);
+
+        driver
+            .blank_check(&mut session, &mut FlashProgress::empty(), &one_sector())
+            .unwrap();
+    }
+
+    #[test]
+    fn default_blank_check_rejects_programmed_flash() {
+        let mut session = fake_session();
+        let mut image = vec![0xff; SECTOR_SIZE as usize];
+        image[0x100] = 0x00;
+        let mut driver = driver_with(image);
+
+        let error = driver
+            .blank_check(&mut session, &mut FlashProgress::empty(), &one_sector())
+            .unwrap_err();
+
+        assert!(matches!(error, FlashError::ChipEraseFailed { .. }));
+    }
+
+    #[test]
+    fn default_erase_selected_sectors_is_unsupported() {
+        let mut session = fake_session();
+        let mut driver = driver_with(vec![0xff; SECTOR_SIZE as usize]);
+
+        let error = driver
+            .erase_selected_sectors(&mut session, &mut FlashProgress::empty(), &one_sector())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FlashError::SectorEraseNotSupported { ref name } if name == "image"
+        ));
+    }
 }

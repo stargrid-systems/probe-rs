@@ -66,6 +66,12 @@ pub enum FlashError {
     /// This target does not support full chip flash erases.
     #[error("The chip erase routine is not supported with the given flash algorithm.")]
     ChipEraseNotSupported,
+    /// This driver cannot erase a chosen set of sectors.
+    #[error("The {name} driver cannot erase a selected set of sectors.")]
+    SectorEraseNotSupported {
+        /// The name of the driver.
+        name: String,
+    },
     /// Attempted to call a vendor function that does not exist in the flash algorithm.
     #[error("The '{name}' vendor-specific function does not exist in the flash algorithm.")]
     VendorFunctionMissing {

@@ -183,11 +183,6 @@ impl Target {
         crate::flashing::FlashLoader::new(self.memory_map.clone(), self.source.clone())
     }
 
-    /// Returns a [RawFlashAlgorithm] by name.
-    pub(crate) fn flash_algorithm_by_name(&self, name: &str) -> Option<&RawFlashAlgorithm> {
-        self.flash_algorithms.iter().find(|a| a.name == name)
-    }
-
     /// Returns the core index from the core name
     pub fn core_index_by_name(&self, name: &str) -> Option<usize> {
         self.cores.iter().position(|c| c.name == name)

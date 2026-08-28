@@ -1,19 +1,98 @@
-use std::collections::HashMap;
-
-use probe_rs_target::{MemoryRange, MemoryRegion, NvmRegion};
+use probe_rs_target::{MemoryRange, MemoryRegion, NvmRegion, SectorInfo};
 
 use crate::Session;
-use crate::flashing::nvm_driver::NvmDriver;
+use crate::flashing::nvm_driver::{self, NvmDriver};
 use crate::flashing::progress::ProgressOperation;
 use crate::flashing::{DownloadOptions, FlashError, FlashLoader, flasher::Flasher};
 use crate::flashing::{FlashLayout, FlashSector};
-use crate::memory::MemoryInterface;
 
 use super::FlashProgress;
 
-struct FlasherWithRegions {
-    flasher: Flasher,
+/// One [`NvmDriver`] together with the regions it covers.
+struct DriverWithRegions {
+    core_index: usize,
+    driver: Box<dyn NvmDriver>,
     regions: Vec<NvmRegion>,
+}
+
+/// Groups the target's NVM regions by the driver that erases them.
+///
+/// `accept` decides whether a region takes part. It runs after the region has been logged,
+/// and it logs its own reason when it skips one.
+fn drivers_for_regions(
+    session: &mut Session,
+    read_flasher_rtt: bool,
+    mut accept: impl FnMut(&NvmRegion) -> bool,
+) -> Result<Vec<DriverWithRegions>, FlashError> {
+    let regions = session
+        .target()
+        .memory_map
+        .iter()
+        .filter_map(MemoryRegion::as_nvm_region)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut drivers = Vec::<DriverWithRegions>::new();
+
+    tracing::debug!("Regions:");
+    for region in regions {
+        tracing::debug!(
+            "    region: {:#010x?} ({} bytes)",
+            region.range,
+            region.range.end - region.range.start
+        );
+
+        if !accept(&region) {
+            continue;
+        }
+
+        // Get the first core that can access the region
+        let Some(core_name) = region.cores.first().cloned() else {
+            return Err(FlashError::NoNvmCoreAccess(region));
+        };
+
+        let core_index = session.target().core_index_by_name(&core_name).unwrap();
+
+        // A target whose probe or debug sequence programs flash directly supplies its own
+        // driver. Only a target without one needs a flash algorithm, so only then is a
+        // missing algorithm an error.
+        let driver = match nvm_driver::driver_for_region(session, &region, core_index) {
+            Some(driver) => driver,
+            None => {
+                let target = session.target();
+                let algo =
+                    FlashLoader::get_flash_algorithm_for_region(&region, target, &core_name, &[])?;
+
+                let mut flasher = Flasher::new(target, core_index, algo)?;
+                flasher.read_rtt_output(read_flasher_rtt);
+
+                Box::new(flasher) as Box<dyn NvmDriver>
+            }
+        };
+
+        tracing::debug!("     -- using driver: {}", driver.name());
+
+        // We don't usually have more than a handful of regions, linear search should be fine.
+        match drivers.iter().position(|entry| {
+            entry.driver.name() == driver.name() && entry.core_index == core_index
+        }) {
+            Some(index) => drivers[index].regions.push(region),
+            None => drivers.push(DriverWithRegions {
+                core_index,
+                driver,
+                regions: vec![region],
+            }),
+        }
+    }
+
+    Ok(drivers)
+}
+
+fn to_flash_sector(info: SectorInfo) -> FlashSector {
+    FlashSector {
+        address: info.base_address,
+        size: info.size,
+    }
 }
 
 /// Mass-erase all nonvolatile memory.
@@ -27,82 +106,34 @@ pub fn erase_all(
 ) -> Result<(), FlashError> {
     tracing::debug!("Erasing all...");
 
-    // TODO: this first loop is pretty much identical to FlashLoader::prepare_plan - can we simplify?
-
-    let mut algos = Vec::<FlasherWithRegions>::new();
-    tracing::debug!("Regions:");
-    for region in session
-        .target()
-        .memory_map
-        .iter()
-        .filter_map(MemoryRegion::as_nvm_region)
-    {
+    let mut drivers = drivers_for_regions(session, read_flasher_rtt, |region| {
         if region.is_alias {
             tracing::debug!("Skipping alias memory region {:#010x?}", region.range);
-            continue;
+            return false;
         }
-        tracing::debug!(
-            "    region: {:#010x?} ({} bytes)",
-            region.range,
-            region.range.end - region.range.start
-        );
-
-        let region = region.clone();
-
-        // Get the first core that can access the region
-        let Some(core_name) = region.cores.first() else {
-            return Err(FlashError::NoNvmCoreAccess(region));
-        };
-
-        let target = session.target();
-        let core = target.core_index_by_name(core_name).unwrap();
-        let algo = FlashLoader::get_flash_algorithm_for_region(&region, target, core_name, &[])?;
-
-        tracing::debug!("     -- using algorithm: {}", algo.name);
-        if let Some(entry) = algos.iter_mut().find(|entry| {
-            entry.flasher.flash_algorithm.name == algo.name && entry.flasher.core_index == core
-        }) {
-            entry.regions.push(region);
-        } else {
-            algos.push(FlasherWithRegions {
-                flasher: {
-                    let mut flasher = Flasher::new(session.target(), core, algo)?;
-                    flasher.read_rtt_output(read_flasher_rtt);
-                    flasher
-                },
-                regions: vec![region],
-            });
-        }
-    }
-
-    // No longer needs to be mutable.
-    let algos = algos;
+        true
+    })?;
 
     let mut do_chip_erase = true;
 
     let mut phases = vec![];
 
-    // Walk through the algos to create a layout of the flash.
-    for el in algos.iter() {
-        let flash_algorithm = &el.flasher.flash_algorithm;
-
-        // If the first flash algo doesn't support erase all, disable chip erase.
+    // Walk through the drivers to create a layout of the flash.
+    for el in drivers.iter() {
+        // If the first driver doesn't support erase all, disable chip erase.
         // TODO: we could sort by support but it's unlikely to make a difference.
-        if do_chip_erase && !el.flasher.is_chip_erase_supported(session) {
+        if do_chip_erase && !el.driver.is_chip_erase_supported(session) {
             do_chip_erase = false;
         }
 
         let mut layout = FlashLayout::default();
 
         for region in el.regions.iter() {
-            for info in flash_algorithm.iter_sectors() {
+            for info in el.driver.geometry().sectors() {
                 let range = info.address_range();
 
                 if region.range.contains_range(&range) {
-                    layout.sectors.push(FlashSector {
-                        address: info.base_address,
-                        size: info.size,
-                    });
+                    layout.sectors.push(to_flash_sector(info));
                 }
             }
         }
@@ -120,44 +151,30 @@ pub fn erase_all(
     }
     progress.initialized(phases);
 
-    for el in algos {
-        let mut flasher = el.flasher;
-        tracing::debug!("Erasing with algorithm: {}", flasher.flash_algorithm.name);
+    for el in drivers.iter_mut() {
+        tracing::debug!("Erasing with driver: {}", el.driver.name());
 
-        if flasher.is_chip_erase_supported(session) {
+        if el.driver.is_chip_erase_supported(session) {
             tracing::debug!("     -- chip erase supported, doing it.");
-            flasher.run_erase_all(session, progress)?;
+            el.driver.erase_all(session, progress)?;
         } else {
             tracing::debug!("     -- chip erase not supported, erasing by sector.");
 
             // loop over all sectors erasing them individually instead.
 
-            let sectors = flasher
-                .flash_algorithm()
-                .iter_sectors()
+            let sectors = el
+                .driver
+                .geometry()
+                .sectors()
                 .filter(|info| {
                     let range = info.base_address..info.base_address + info.size;
                     el.regions.iter().any(|r| r.range.contains_range(&range))
                 })
+                .map(to_flash_sector)
                 .collect::<Vec<_>>();
 
-            flasher.run_erase(session, progress, |active| {
-                for info in sectors {
-                    tracing::debug!(
-                        "    sector: {:#010x}-{:#010x} ({} bytes)",
-                        info.base_address,
-                        info.base_address + info.size,
-                        info.size
-                    );
-                    let sector = FlashSector {
-                        address: info.base_address,
-                        size: info.size,
-                    };
-
-                    active.erase_sector(&sector)?;
-                }
-                Ok(())
-            })?;
+            el.driver
+                .erase_selected_sectors(session, progress, &sectors)?;
         }
     }
 
@@ -186,73 +203,37 @@ pub fn erase(
 
     let address_range = address_start..address_end;
 
-    let mut algos: HashMap<(String, String), Vec<NvmRegion>> = HashMap::new();
-    tracing::debug!("Regions:");
-    for region in session
-        .target()
-        .memory_map
-        .iter()
-        .filter_map(MemoryRegion::as_nvm_region)
-    {
-        tracing::debug!(
-            "    region: {:#010x?} ({} bytes)",
-            region.range,
-            region.range.end - region.range.start
-        );
-
+    let mut drivers = drivers_for_regions(session, read_flasher_rtt, |region| {
         // If we have nothing to do in this region, ignore it.
         // This avoids uselessly initializing and deinitializing its flash algorithm.
         // We do not check for alias regions here, as we'll work with them if the range explicitly
         // targets them.
         if !region.range.intersects_range(&address_range) {
             tracing::debug!("     -- doesn't overlap, ignoring!");
-            continue;
+            return false;
         }
+        true
+    })?;
 
-        // Get the first core that can access the region
-        let core_name = region
-            .cores
-            .first()
-            .ok_or_else(|| FlashError::NoNvmCoreAccess(region.clone()))?;
+    for el in drivers.iter_mut() {
+        tracing::debug!("Erasing with driver: {}", el.driver.name());
 
-        let algo =
-            FlashLoader::get_flash_algorithm_for_region(region, session.target(), core_name, &[])?;
-
-        let entry = algos
-            .entry((algo.name.clone(), core_name.clone()))
-            .or_default();
-        entry.push(region.clone());
-
-        tracing::debug!("     -- using algorithm: {}", algo.name);
-    }
-
-    for ((algo_name, core_name), regions) in algos {
-        tracing::debug!("Erasing with algorithm: {}", algo_name);
-
-        // This can't fail, algo_name comes from the target.
-        let algo = session.target().flash_algorithm_by_name(&algo_name);
-        let algo = algo.unwrap();
-
-        let core_index = session.target().core_index_by_name(&core_name).unwrap();
-        let mut flasher = Flasher::new(session.target(), core_index, algo)?;
-
-        flasher.read_rtt_output(read_flasher_rtt);
-
-        let sectors = flasher
-            .flash_algorithm()
-            .iter_sectors()
+        let sectors = el
+            .driver
+            .geometry()
+            .sectors()
             .filter(|info| address_range.intersects_range(&info.address_range()))
             .filter(|info| {
                 let range = info.base_address..info.base_address + info.size;
-                regions.iter().any(|r| r.range.contains_range(&range))
+                el.regions.iter().any(|r| r.range.contains_range(&range))
             })
+            .map(to_flash_sector)
             .collect::<Vec<_>>();
 
         let restore_data = if restore {
             read_restore_data(
-                &mut flasher,
+                el.driver.as_mut(),
                 session,
-                core_index,
                 &sectors,
                 address_start,
                 address_end,
@@ -261,24 +242,8 @@ pub fn erase(
             Vec::new()
         };
 
-        flasher.run_erase(session, progress, |active| {
-            for info in &sectors {
-                tracing::debug!(
-                    "    sector: {:#010x}-{:#010x} ({} bytes)",
-                    info.base_address,
-                    info.base_address + info.size,
-                    info.size
-                );
-
-                let sector = FlashSector {
-                    address: info.base_address,
-                    size: info.size,
-                };
-
-                active.erase_sector(&sector)?;
-            }
-            Ok(())
-        })?;
+        el.driver
+            .erase_selected_sectors(session, progress, &sectors)?;
 
         if !restore_data.is_empty() {
             let mut loader = session.target().flash_loader();
@@ -302,18 +267,17 @@ pub fn erase(
 
 /// Read bytes that sit in `sectors` but outside `address_start..address_end`.
 fn read_restore_data(
-    flasher: &mut Flasher,
+    driver: &mut dyn NvmDriver,
     session: &mut Session,
-    core_index: usize,
-    sectors: &[probe_rs_target::SectorInfo],
+    sectors: &[FlashSector],
     address_start: u64,
     address_end: u64,
 ) -> Result<Vec<(u64, Vec<u8>)>, FlashError> {
     let mut ranges = Vec::new();
 
-    for info in sectors {
-        let sector_start = info.base_address;
-        let sector_end = info.base_address + info.size;
+    for sector in sectors {
+        let sector_start = sector.address();
+        let sector_end = sector.address() + sector.size();
 
         if sector_start < address_start {
             let head_end = address_start.min(sector_end);
@@ -336,23 +300,14 @@ fn read_restore_data(
 
     let mut restore_data = Vec::with_capacity(ranges.len());
 
-    if flasher.flash_algorithm().pc_read.is_some() {
-        flasher.run_verify(session, &mut FlashProgress::empty(), |active| {
-            for &(address, len) in &ranges {
-                let mut buf = vec![0; len];
-                active.read_flash(address, &mut buf)?;
-                restore_data.push((address, buf));
-            }
-            Ok(())
-        })?;
-    } else {
-        let mut core = session.core(core_index).map_err(FlashError::Core)?;
-        for (address, len) in ranges {
+    driver.with_reader(session, &mut |reader| {
+        for &(address, len) in &ranges {
             let mut buf = vec![0; len];
-            core.read(address, &mut buf).map_err(FlashError::Core)?;
+            reader.read(address, &mut buf)?;
             restore_data.push((address, buf));
         }
-    }
+        Ok(())
+    })?;
 
     Ok(restore_data)
 }
@@ -369,86 +324,34 @@ pub fn run_blank_check(
 
     let address_range = address_start..address_end;
 
-    let mut algos: HashMap<(String, String), Vec<NvmRegion>> = HashMap::new();
-    tracing::debug!("Regions:");
-    for region in session
-        .target()
-        .memory_map
-        .iter()
-        .filter_map(MemoryRegion::as_nvm_region)
-    {
-        tracing::debug!(
-            "    region: {:#010x?} ({} bytes)",
-            region.range,
-            region.range.end - region.range.start
-        );
-
+    let mut drivers = drivers_for_regions(session, read_flasher_rtt, |region| {
         // If we have nothing to do in this region, ignore it.
         // This avoids uselessly initializing and deinitializing its flash algorithm.
         // We do not check for alias regions here, as we'll work with them if the range explicitly
         // targets them.
         if !region.range.intersects_range(&address_range) {
             tracing::debug!("     -- doesn't overlap, ignoring!");
-            continue;
+            return false;
         }
+        true
+    })?;
 
-        // Get the first core that can access the region
-        let core_name = region
-            .cores
-            .first()
-            .ok_or_else(|| FlashError::NoNvmCoreAccess(region.clone()))?;
+    for el in drivers.iter_mut() {
+        tracing::debug!("Blank-checking with driver: {}", el.driver.name());
 
-        let algo =
-            FlashLoader::get_flash_algorithm_for_region(region, session.target(), core_name, &[])?;
-
-        let entry = algos
-            .entry((algo.name.clone(), core_name.clone()))
-            .or_default();
-        entry.push(region.clone());
-
-        tracing::debug!("     -- using algorithm: {}", algo.name);
-    }
-
-    for ((algo_name, core_name), regions) in algos {
-        tracing::debug!("Blank-checking with algorithm: {}", algo_name);
-
-        // This can't fail, algo_name comes from the target.
-        let algo = session.target().flash_algorithm_by_name(&algo_name);
-        let algo = algo.unwrap();
-
-        let core_index = session.target().core_index_by_name(&core_name).unwrap();
-        let mut flasher = Flasher::new(session.target(), core_index, algo)?;
-
-        flasher.read_rtt_output(read_flasher_rtt);
-
-        let sectors = flasher
-            .flash_algorithm()
-            .iter_sectors()
+        let sectors = el
+            .driver
+            .geometry()
+            .sectors()
             .filter(|info| address_range.contains_range(&info.address_range()))
             .filter(|info| {
                 let range = info.base_address..info.base_address + info.size;
-                regions.iter().any(|r| r.range.contains_range(&range))
+                el.regions.iter().any(|r| r.range.contains_range(&range))
             })
+            .map(to_flash_sector)
             .collect::<Vec<_>>();
 
-        flasher.run_verify(session, progress, |active| {
-            for info in sectors {
-                tracing::debug!(
-                    "    sector: {:#010x}-{:#010x} ({} bytes)",
-                    info.base_address,
-                    info.base_address + info.size,
-                    info.size
-                );
-
-                let sector = FlashSector {
-                    address: info.base_address,
-                    size: info.size,
-                };
-
-                active.blank_check(&sector)?;
-            }
-            Ok(())
-        })?;
+        el.driver.blank_check(session, progress, &sectors)?;
     }
 
     Ok(())
