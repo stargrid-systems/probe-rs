@@ -12,7 +12,7 @@ use serde::Serialize;
 pub struct DebugRegister {
     /// To lookup platform specific details of core register definitions.
     pub core_register: &'static CoreRegister,
-    /// [DWARF](https://dwarfstd.org) specification, section 2.6.1.1.3.1 "... operations encode the names of up to 32 registers, numbered from 0 through 31, inclusive ..."
+    /// The DWARF register number of [`Self::core_register`], if the architecture assigns one.
     pub dwarf_id: Option<u16>,
     /// The value of the register is read from the target memory and updated as needed.
     pub value: Option<RegisterValue>,
@@ -115,18 +115,13 @@ impl DebugRegisters {
         mut reg_value: impl FnMut(&RegisterId) -> Option<RegisterValue>,
     ) -> Self {
         let mut debug_registers = Vec::<DebugRegister>::new();
-        for (dwarf_id, core_register) in regs.core_registers().enumerate() {
+        for core_register in regs.core_registers() {
             // Check to ensure the register type is compatible with u64.
             if matches!(core_register.data_type(), RegisterDataType::UnsignedInteger(size_in_bits) if size_in_bits <= 64)
             {
                 debug_registers.push(DebugRegister {
                     core_register,
-                    // The DWARF register ID is only valid for the first 32 registers.
-                    dwarf_id: if dwarf_id < 32 {
-                        Some(dwarf_id as u16)
-                    } else {
-                        None
-                    },
+                    dwarf_id: core_register.dwarf_id(),
                     value: reg_value(&core_register.id()),
                 });
             } else {
@@ -219,8 +214,7 @@ impl DebugRegisters {
             .find(|debug_register| debug_register.core_register.id == register_id)
     }
 
-    /// Get the register value using the positional index into core registers.
-    /// [DWARF](https://dwarfstd.org) specification, section 2.6.1.1.3.1 "... operations encode the names of up to 32 registers, numbered from 0 through 31, inclusive ..."
+    /// Get the register that DWARF debug information refers to by the given register number.
     pub fn get_register_by_dwarf_id(&self, dwarf_id: u16) -> Option<&DebugRegister> {
         self.0
             .iter()

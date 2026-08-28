@@ -1980,6 +1980,7 @@ mod tests {
     static U32_ROLES: [RegisterRole; 1] = [RegisterRole::Core("r0")];
     static U32_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(0),
+        dwarf_id: None,
         roles: &U32_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Clear,
@@ -1988,6 +1989,7 @@ mod tests {
     static U64_ROLES: [RegisterRole; 1] = [RegisterRole::Core("x0")];
     static U64_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(1),
+        dwarf_id: None,
         roles: &U64_ROLES,
         data_type: RegisterDataType::UnsignedInteger(64),
         unwind_rule: UnwindRule::Clear,
@@ -1996,6 +1998,7 @@ mod tests {
     static U128_ROLES: [RegisterRole; 1] = [RegisterRole::Core("v0")];
     static U128_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(2),
+        dwarf_id: None,
         roles: &U128_ROLES,
         data_type: RegisterDataType::UnsignedInteger(128),
         unwind_rule: UnwindRule::Clear,
@@ -2004,6 +2007,7 @@ mod tests {
     static FP_ROLES: [RegisterRole; 1] = [RegisterRole::Core("f0")];
     static FP_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(3),
+        dwarf_id: None,
         roles: &FP_ROLES,
         data_type: RegisterDataType::FloatingPoint(32),
         unwind_rule: UnwindRule::Clear,
@@ -2012,6 +2016,7 @@ mod tests {
     static PC_ROLES: [RegisterRole; 2] = [RegisterRole::Core("pc"), RegisterRole::ProgramCounter];
     static PC_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(4),
+        dwarf_id: None,
         roles: &PC_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Clear,
@@ -2020,6 +2025,7 @@ mod tests {
     static A0_ROLES: [RegisterRole; 2] = [RegisterRole::Core("a0"), RegisterRole::Other("x10")];
     static A0_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(10),
+        dwarf_id: None,
         roles: &A0_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Clear,
@@ -2029,6 +2035,7 @@ mod tests {
         [RegisterRole::Core("xpsr"), RegisterRole::ProcessorStatus];
     static STATUS_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(16),
+        dwarf_id: None,
         roles: &STATUS_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Clear,
@@ -2037,6 +2044,7 @@ mod tests {
     static SP_ROLES: [RegisterRole; 2] = [RegisterRole::Core("sp"), RegisterRole::StackPointer];
     static SP_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(17),
+        dwarf_id: None,
         roles: &SP_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Clear,
@@ -2045,6 +2053,7 @@ mod tests {
     static LR_ROLES: [RegisterRole; 2] = [RegisterRole::Core("lr"), RegisterRole::ReturnAddress];
     static LR_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(18),
+        dwarf_id: None,
         roles: &LR_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Clear,
@@ -2053,6 +2062,7 @@ mod tests {
     static PRESERVED_ROLES: [RegisterRole; 1] = [RegisterRole::Core("r4")];
     static PRESERVED_REGISTER: CoreRegister = CoreRegister {
         id: RegisterId(19),
+        dwarf_id: None,
         roles: &PRESERVED_ROLES,
         data_type: RegisterDataType::UnsignedInteger(32),
         unwind_rule: UnwindRule::Preserve,

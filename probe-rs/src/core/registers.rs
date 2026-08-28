@@ -106,6 +106,17 @@ pub enum UnwindRule {
 pub struct CoreRegister {
     /// Some architectures have multiple names for the same register, depending on the context and the role of the register.
     pub id: RegisterId,
+    /// The register number that [DWARF](https://dwarfstd.org) debug information uses to refer to
+    /// this register, if the architecture assigns one.
+    ///
+    /// Each architecture's ABI defines its own DWARF numbering. The number does not have to match
+    /// [`CoreRegister::id`], and it does not have to match the position of the register in the
+    /// architecture's register list, so it is stated explicitly here. AVR shows why: its general
+    /// purpose registers r0 to r31 are DWARF 0 to 31, and the stack pointer low byte is DWARF 32.
+    ///
+    /// Not serialized, because `probe_rs_debug::DebugRegister` already carries this number.
+    #[serde(skip_serializing)]
+    pub dwarf_id: Option<u16>,
     /// If the register plays a special role (one or more) during program execution and exception handling, this array will contain the appropriate [`RegisterRole`] entry/entries.
     pub roles: &'static [RegisterRole],
     /// The data type of the register
@@ -157,6 +168,11 @@ impl CoreRegister {
     /// Get the id of this register
     pub fn id(&self) -> RegisterId {
         self.id
+    }
+
+    /// Get the DWARF register number of this register, if the architecture assigns one.
+    pub fn dwarf_id(&self) -> Option<u16> {
+        self.dwarf_id
     }
 
     /// Get the type of data stored in this register
@@ -711,5 +727,112 @@ impl CoreRegisters {
             .filter(|r| r.register_has_role(RegisterRole::FloatingPoint))
             .cloned()
             .nth(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::architecture::arm::core::registers::{
+        aarch32::{
+            AARCH32_CORE_REGISTERS, AARCH32_WITH_FP_16_CORE_REGISTERS,
+            AARCH32_WITH_FP_32_CORE_REGISTERS,
+        },
+        aarch64::AARCH64_CORE_REGISTERS,
+        armv8m::{
+            V8M_BASE_SEC_FP_REGISTERS, V8M_BASE_SEC_REGISTERS, V8M_MAIN_FP_REGISTERS,
+            V8M_MAIN_REGISTERS, V8M_MAIN_SEC_FP_REGISTERS, V8M_MAIN_SEC_REGISTERS,
+        },
+        cortex_m::{CORTEX_M_CORE_REGISTERS, CORTEX_M_WITH_FP_CORE_REGISTERS},
+    };
+    use crate::architecture::riscv::{
+        registers::{RISCV_CORE_REGISTERS, RISCV_WITH_FP_CORE_REGISTERS},
+        registers64::{RISCV64_CORE_REGISTERS, RISCV64_WITH_FP_CORE_REGISTERS},
+    };
+    use crate::architecture::xtensa::registers::XTENSA_CORE_REGISTERS;
+
+    /// The rule that used to derive DWARF numbers: the position of the register in the list, and
+    /// only for the first 32 entries.
+    fn positional_dwarf_id(index: usize) -> Option<u16> {
+        if index < 32 { Some(index as u16) } else { None }
+    }
+
+    /// Armv8-M security registers sit at a different position depending on whether the register
+    /// file also contains the Main Extension registers, so the old rule gave them two different
+    /// numbers. They now carry the number they had without the Main Extension. None of these
+    /// numbers is a DWARF number that Arm defines, so no debug information refers to them.
+    const V8M_SECURITY_REGISTERS: &[&str] = &[
+        "MSP_NS", "PSP_NS", "MSP_S", "PSP_S", "MSPLIM_S", "PSPLIM_S", "EXTRA_S", "EXTRA_NS",
+    ];
+
+    fn assert_matches_positional_rule(name: &str, registers: &CoreRegisters, skip: &[&str]) {
+        for (index, register) in registers.core_registers().enumerate() {
+            if skip.contains(&register.name()) {
+                continue;
+            }
+            assert_eq!(
+                register.dwarf_id,
+                positional_dwarf_id(index),
+                "{name}: register {} at index {index}",
+                register.name()
+            );
+        }
+    }
+
+    /// The explicit DWARF numbers must reproduce what the old positional rule produced.
+    #[test]
+    fn dwarf_ids_match_the_old_positional_rule() {
+        let files: &[(&str, &CoreRegisters, &[&str])] = &[
+            ("CORTEX_M", &CORTEX_M_CORE_REGISTERS, &[]),
+            ("CORTEX_M_WITH_FP", &CORTEX_M_WITH_FP_CORE_REGISTERS, &[]),
+            ("AARCH32", &AARCH32_CORE_REGISTERS, &[]),
+            (
+                "AARCH32_WITH_FP_16",
+                &AARCH32_WITH_FP_16_CORE_REGISTERS,
+                &[],
+            ),
+            (
+                "AARCH32_WITH_FP_32",
+                &AARCH32_WITH_FP_32_CORE_REGISTERS,
+                &[],
+            ),
+            ("AARCH64", &AARCH64_CORE_REGISTERS, &[]),
+            ("V8M_BASE_SEC", &V8M_BASE_SEC_REGISTERS, &[]),
+            ("V8M_BASE_SEC_FP", &V8M_BASE_SEC_FP_REGISTERS, &[]),
+            ("V8M_MAIN", &V8M_MAIN_REGISTERS, &[]),
+            ("V8M_MAIN_FP", &V8M_MAIN_FP_REGISTERS, &[]),
+            (
+                "V8M_MAIN_SEC",
+                &V8M_MAIN_SEC_REGISTERS,
+                V8M_SECURITY_REGISTERS,
+            ),
+            (
+                "V8M_MAIN_SEC_FP",
+                &V8M_MAIN_SEC_FP_REGISTERS,
+                V8M_SECURITY_REGISTERS,
+            ),
+            ("RISCV", &RISCV_CORE_REGISTERS, &[]),
+            ("RISCV_WITH_FP", &RISCV_WITH_FP_CORE_REGISTERS, &[]),
+            ("RISCV64", &RISCV64_CORE_REGISTERS, &[]),
+            ("RISCV64_WITH_FP", &RISCV64_WITH_FP_CORE_REGISTERS, &[]),
+            ("XTENSA", &XTENSA_CORE_REGISTERS, &[]),
+        ];
+
+        for (name, registers, skip) in files {
+            assert_matches_positional_rule(name, registers, skip);
+        }
+    }
+
+    /// Pin down the one case the explicit numbers cannot reproduce, so it stays visible.
+    #[test]
+    fn v8m_security_registers_keep_their_base_extension_numbers() {
+        for registers in [&V8M_MAIN_SEC_REGISTERS, &V8M_MAIN_SEC_FP_REGISTERS] {
+            for (index, register) in registers.core_registers().enumerate() {
+                if V8M_SECURITY_REGISTERS.contains(&register.name()) {
+                    // The two Main Extension registers push these two places further down.
+                    assert_eq!(register.dwarf_id, positional_dwarf_id(index - 2));
+                }
+            }
+        }
     }
 }
