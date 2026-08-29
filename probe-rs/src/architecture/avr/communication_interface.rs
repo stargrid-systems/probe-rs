@@ -28,7 +28,6 @@
 //! here.
 
 use std::fmt;
-use std::sync::Once;
 
 use crate::error::Error;
 use crate::memory::MemoryInterface;
@@ -101,16 +100,13 @@ pub fn to_chip_data_address(address: u64) -> Result<u32, AvrError> {
     Ok(chip as u32)
 }
 
-/// Warns once that the tiny flash base has never been checked on a part.
-static TINY_FLASH_BASE_UNVERIFIED: Once = Once::new();
-
 /// Converts a probe-rs flash address to the address the tool scripts use.
 ///
 /// probe-rs places flash at zero and the flash scripts place it at
 /// [`AvrFamily::flash_base`], so this adds that base.
 ///
-/// The base for [`AvrFamily::Tiny0`] has never been checked against a part, so
-/// the first call for a tiny target logs a warning.
+/// Both bases are verified on hardware, `0x800000` on an AVR128DA64 and
+/// `0x8000` on an ATtiny406.
 ///
 /// # Examples
 ///
@@ -127,16 +123,6 @@ static TINY_FLASH_BASE_UNVERIFIED: Once = Once::new();
 pub fn to_tool_flash_address(family: AvrFamily, address: u64) -> Result<u32, AvrError> {
     if address >= DATA_SPACE_OFFSET {
         return Err(AvrError::NotInFlash(address));
-    }
-
-    if family == AvrFamily::Tiny0 {
-        TINY_FLASH_BASE_UNVERIFIED.call_once(|| {
-            tracing::warn!(
-                "The flash base offset for tinyAVR 0/1-series parts is a guess. \
-                 It has never been read back from a part, so flash access may \
-                 land in the wrong place."
-            );
-        });
     }
 
     let tool = address + family.flash_base();
@@ -859,11 +845,10 @@ mod tests {
         assert_eq!(to_tool_flash_address(dx, 0x1_FFFF).unwrap(), 0x81_FFFF);
     }
 
-    /// The tiny flash base is a guess, so pin it separately from the Dx one.
-    /// If a part ever proves it wrong, only this test and
-    /// [`AvrFamily::flash_base`] change.
+    /// The tiny base differs from the Dx one, so pin it separately. Both are
+    /// read back from a part, an ATtiny406 here and an AVR128DA64 above.
     #[test]
-    fn tiny_flash_addresses_gain_the_unverified_base() {
+    fn tiny_flash_addresses_gain_the_tiny_base() {
         let tiny = AvrFamily::Tiny0;
 
         assert_eq!(to_tool_flash_address(tiny, 0x0).unwrap(), 0x8000);

@@ -374,12 +374,13 @@ impl AvrFamily {
     /// The value for [`AvrFamily::Dx`] is `0x800000` and is verified on an
     /// AVR128DA64.
     ///
-    /// The value for [`AvrFamily::Tiny0`] is **not verified on hardware**. The
-    /// tinyAVR 0-series and 1-series map their whole flash into the data space
-    /// at `0x8000`, which is why the mapped window covers all 4 KiB on an
-    /// ATtiny406 but only 32 KiB of 128 KiB on a Dx part. A base of `0x8000` is
-    /// the plausible consequence, but nobody has read a known byte both ways
-    /// and compared. Treat it as a guess until somebody has.
+    /// The value for [`AvrFamily::Tiny0`] is `0x8000` and is verified on an
+    /// ATtiny406. These parts map their whole flash into the data space at
+    /// `0x8000`, which is why the mapped window covers all 4 KiB on an
+    /// ATtiny406 but only 32 KiB of 128 KiB on a Dx part. Reading the reset
+    /// vector through `ReadProgmem` at this base and through `ReadMem8` at the
+    /// mapped window gives the same bytes, and they are a real vector table
+    /// rather than blank flash.
     ///
     /// # Examples
     ///
@@ -393,7 +394,7 @@ impl AvrFamily {
         match self {
             // Verified on hardware on an AVR128DA64.
             AvrFamily::Dx => 0x0080_0000,
-            // Unverified. See the doc comment.
+            // Verified on hardware on an ATtiny406.
             AvrFamily::Tiny0 => 0x0000_8000,
         }
     }
