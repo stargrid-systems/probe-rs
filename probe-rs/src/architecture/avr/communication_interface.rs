@@ -157,14 +157,6 @@ pub enum AvrError {
     #[ignore_extra_doc_attributes]
     NotInFlash(u64),
 
-    /// A word access needs an even address and an even length, but got address {address:#x} and length {length}.
-    UnalignedWordAccess {
-        /// The address of the access.
-        address: u64,
-        /// The length of the access in bytes.
-        length: usize,
-    },
-
     /// The device signature reply was {0} bytes, which is too short to decode.
     ShortDeviceId(usize),
 
@@ -380,26 +372,6 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// Writes the data space one byte at a time.
     pub fn write_data_8(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
         self.write(ScriptName::WriteMem8, to_chip_data_address(address)?, data)
-    }
-
-    /// Reads the data space one word at a time.
-    ///
-    /// Both the address and the length have to be even, because the script does
-    /// a 16-bit access per step. The length is passed to the script as a byte
-    /// count, the same as for the byte-wide script.
-    pub fn read_data_16(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
-        check_word_aligned(address, data.len())?;
-
-        self.read(ScriptName::ReadMem16, to_chip_data_address(address)?, data)
-    }
-
-    /// Writes the data space one word at a time.
-    ///
-    /// The alignment rules of [`AvrCommunicationInterface::read_data_16`] apply.
-    pub fn write_data_16(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
-        check_word_aligned(address, data.len())?;
-
-        self.write(ScriptName::WriteMem16, to_chip_data_address(address)?, data)
     }
 
     /// Reads flash.
@@ -618,15 +590,6 @@ fn check_breakpoint_unit(unit: usize) -> Result<u32, AvrError> {
     Ok(unit as u32)
 }
 
-/// A word-wide script steps two bytes at a time, so both ends have to be even.
-fn check_word_aligned(address: u64, length: usize) -> Result<(), AvrError> {
-    if !address.is_multiple_of(2) || !length.is_multiple_of(2) {
-        return Err(AvrError::UnalignedWordAccess { address, length });
-    }
-
-    Ok(())
-}
-
 /// Wraps a probe-specific error so this module does not name the probe driver.
 fn probe_error(err: impl crate::probe::ProbeError) -> AvrError {
     AvrError::DebugProbe(DebugProbeError::ProbeSpecific(err.into()))
@@ -687,31 +650,28 @@ impl AvrCommunicationInterface<'_> {
         }
     }
 
-    /// Reads bytes a word at a time where the space has a word-wide script.
-    ///
-    /// Flash has no word-wide script, so a flash read falls back to the same
-    /// call [`AvrCommunicationInterface::read_bytes`] makes.
-    fn read_words(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
-        match AddressSpace::of(address) {
-            AddressSpace::Flash => self.read_flash(address, data),
-            AddressSpace::Data => self.read_data_16(address, data),
-        }
-    }
-
-    /// Writes bytes a word at a time. See [`AvrCommunicationInterface::read_words`].
-    fn write_words(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
-        match AddressSpace::of(address) {
-            AddressSpace::Flash => self.write_flash(address, data),
-            AddressSpace::Data => self.write_data_16(address, data),
-        }
-    }
 }
 
 /// Memory access on an 8-bit Harvard machine.
 ///
-/// Every access routes to flash or to the data space by address, and the widths
-/// wider than a byte are built out of the byte and word scripts. There is no
-/// native access wider than 16 bits.
+/// Every access routes to flash or to the data space by address, and every
+/// width is built out of the byte-wide scripts.
+///
+/// # Why the word-wide scripts are not used
+///
+/// The tool pack ships `ReadMem16` and `WriteMem16`, and they are wrong on
+/// byte-organised memory. On an ATtiny406 a word read of SRAM returns the byte
+/// at the even address twice, and a word write stores only the low byte and
+/// leaves the odd byte alone. Both fail silently.
+///
+/// They work on word-organised memory at an even address, which is flash and
+/// the signature row, and nowhere else. Reading `0x1100` gives the true bytes
+/// while `0x1103`, the same row one byte along, duplicates. SRAM, the fuses and
+/// the EEPROM are byte memories, so every access to them duplicates.
+///
+/// Nothing is lost by dropping them. The scripts do a fully addressed access
+/// per element either way, so a word-wide read is not faster than two
+/// byte-wide ones.
 impl MemoryInterface<Error> for AvrCommunicationInterface<'_> {
     fn supports_native_64bit_access(&mut self) -> bool {
         false
@@ -725,9 +685,10 @@ impl MemoryInterface<Error> for AvrCommunicationInterface<'_> {
         Ok(self.read_bytes(address, data)?)
     }
 
+    /// Reads 16-bit values a byte at a time. See the note on this impl.
     fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
         let mut bytes = vec![0; data.len() * 2];
-        self.read_words(address, &mut bytes)?;
+        self.read_bytes(address, &mut bytes)?;
 
         let (chunks, _rest) = bytes.as_chunks::<2>();
         for (word, chunk) in data.iter_mut().zip(chunks) {
@@ -775,10 +736,11 @@ impl MemoryInterface<Error> for AvrCommunicationInterface<'_> {
         Ok(self.write_bytes(address, data)?)
     }
 
+    /// Writes 16-bit values a byte at a time. See the note on this impl.
     fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), Error> {
         let bytes: Vec<u8> = data.iter().flat_map(|word| word.to_le_bytes()).collect();
 
-        Ok(self.write_words(address, &bytes)?)
+        Ok(self.write_bytes(address, &bytes)?)
     }
 
     fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
@@ -891,14 +853,6 @@ mod tests {
         assert!(to_chip_data_address(too_high).is_err());
         assert!(to_chip_data_address(too_high - 1).is_ok());
         assert!(to_chip_data_address(DATA_SPACE_OFFSET + 0x1_0000).is_err());
-    }
-
-    #[test]
-    fn word_accesses_need_even_address_and_length() {
-        assert!(check_word_aligned(0x80_4000, 2).is_ok());
-        assert!(check_word_aligned(0x80_4000, 0).is_ok());
-        assert!(check_word_aligned(0x80_4001, 2).is_err());
-        assert!(check_word_aligned(0x80_4000, 3).is_err());
     }
 
     /// Routing is the whole of the Harvard split, so pin where the boundary is

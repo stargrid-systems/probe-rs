@@ -124,8 +124,17 @@ pub enum ScriptName {
     /// Writes data space one byte at a time. Takes an address and a length.
     WriteMem8,
     /// Reads data space one word at a time. Takes an address and a length.
+    ///
+    /// Only correct on word-organised memory at an even address, which is
+    /// flash and the signature row. On SRAM, the fuses and the EEPROM it
+    /// returns the byte at the even address twice. The driver reads the data
+    /// space with [`ScriptName::ReadMem8`] instead.
     ReadMem16,
     /// Writes data space one word at a time. Takes an address and a length.
+    ///
+    /// Carries the same restriction as [`ScriptName::ReadMem16`], and fails the
+    /// same silent way: on byte-organised memory it stores the low byte of each
+    /// word and leaves the odd byte untouched.
     WriteMem16,
     /// Reads flash. Takes an address and a length.
     ReadProgmem,
