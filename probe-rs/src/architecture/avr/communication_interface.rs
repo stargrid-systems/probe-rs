@@ -48,6 +48,17 @@ pub const DATA_SPACE_OFFSET: u64 = 0x0080_0000;
 /// than the AVR address space, which is far smaller.
 const MAX_TOOL_ADDRESS: u64 = u32::MAX as u64;
 
+/// The highest address the data space has.
+///
+/// The AVR data space is 64 KB on every part this supports. The low half holds
+/// the registers, the IO space, the EEPROM and the SRAM, and the high half is
+/// the window part of the flash is mapped into.
+///
+/// Handing the tool an address past this hangs it, so it is checked rather than
+/// trusted. Wedge rule 4 is the same idea: never issue a memory access that the
+/// part cannot answer.
+const MAX_DATA_ADDRESS: u64 = 0xFFFF;
+
 /// How many hardware breakpoint units the debug block has.
 ///
 /// There are exactly two and there is no way around it.
@@ -83,7 +94,7 @@ pub fn to_chip_data_address(address: u64) -> Result<u32, AvrError> {
         .checked_sub(DATA_SPACE_OFFSET)
         .ok_or(AvrError::NotInDataSpace(address))?;
 
-    if chip > MAX_TOOL_ADDRESS {
+    if chip > MAX_DATA_ADDRESS {
         return Err(AvrError::NotInDataSpace(address));
     }
 
@@ -886,12 +897,15 @@ mod tests {
         assert!(u64::from(data) < 0x80_1234);
     }
 
+    /// A stale or garbage variable location lands here, and forwarding it to
+    /// the tool hangs it rather than returning an error.
     #[test]
-    fn data_addresses_beyond_a_word_are_rejected() {
-        let too_high = DATA_SPACE_OFFSET + MAX_TOOL_ADDRESS + 1;
+    fn data_addresses_past_the_data_space_are_rejected() {
+        let too_high = DATA_SPACE_OFFSET + MAX_DATA_ADDRESS + 1;
 
         assert!(to_chip_data_address(too_high).is_err());
         assert!(to_chip_data_address(too_high - 1).is_ok());
+        assert!(to_chip_data_address(DATA_SPACE_OFFSET + 0x1_0000).is_err());
     }
 
     #[test]
