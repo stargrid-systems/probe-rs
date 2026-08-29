@@ -362,6 +362,36 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         Ok(())
     }
 
+    /// Opens a debug session on a running part without restarting it.
+    ///
+    /// [`AvrCommunicationInterface::enter_programming_mode`] asserts
+    /// `ASI_RESET_REQ`, so the ordinary way in restarts the target and destroys
+    /// whatever state you attached to look at. The `EnterDebugMode` script
+    /// writes nothing to that register, so this reaches a part mid-flight and
+    /// leaves it running. Confirmed on an AVR128DA64: the halt status still
+    /// reads running afterwards and the program counter keeps moving.
+    ///
+    /// The core is left running. Halt it if you want it stopped.
+    ///
+    /// # Why this is not the default
+    ///
+    /// Only `EnterProgMode` reports whether the part is locked, so a session
+    /// opened this way never learns it. A locked part hangs the tool on the
+    /// first memory access, and only a replug recovers it. The two properties
+    /// are mutually exclusive with these scripts: a session either learns the
+    /// lock state or leaves the part running, never both.
+    ///
+    /// Use this only on a part known to be unlocked.
+    pub fn attach_without_reset(&mut self) -> Result<(), AvrError> {
+        self.probe.enter_debug_mode_hot().map_err(probe_error)?;
+
+        if let Some(speed_khz) = self.state.speed_khz {
+            self.probe.set_speed_khz(speed_khz).map_err(probe_error)?;
+        }
+
+        Ok(())
+    }
+
     /// Reads the device signature and revision.
     ///
     /// The answer is cached in the interface state, so repeated calls cost

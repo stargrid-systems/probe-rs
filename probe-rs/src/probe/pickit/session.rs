@@ -169,6 +169,36 @@ impl Pickit {
         Ok(())
     }
 
+    /// Opens a debug session without resetting the part.
+    ///
+    /// [`Pickit::enter_prog_mode`] is the usual way in and it restarts the
+    /// target, because its script asserts `ASI_RESET_REQ`. `EnterDebugMode`
+    /// writes nothing to that register at all, so this reaches a part that is
+    /// already running and leaves it running. That is the difference between
+    /// debugging a fault and destroying the evidence for it.
+    ///
+    /// Two things are given up. The lock state is never learned, because only
+    /// `EnterProgMode` reports it, so the session cannot move itself to
+    /// [`SessionState::Locked`] and rule 4 has nothing to act on. And the part
+    /// is left wherever it was rather than at the reset vector.
+    ///
+    /// Only use this on a part known to be unlocked.
+    pub fn enter_debug_mode_hot(&mut self) -> Result<(), PickitError> {
+        match self.state {
+            SessionState::Cold => {}
+            SessionState::Hung => return Err(PickitError::Hung),
+            SessionState::Locked => return Err(PickitError::TargetLocked),
+            SessionState::Programming | SessionState::Debugging => {
+                return Err(PickitError::SessionAlreadyOpen);
+            }
+        }
+
+        self.command(ScriptName::EnterDebugMode)?.check()?;
+        self.state = SessionState::Debugging;
+
+        Ok(())
+    }
+
     /// Closes the session and returns the tool to [`SessionState::Cold`].
     ///
     /// This does nothing when no session is open, and nothing when the tool is
