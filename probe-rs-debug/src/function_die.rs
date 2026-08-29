@@ -266,6 +266,12 @@ impl<'a> FunctionDie<'a> {
         memory: &mut dyn MemoryInterface,
         frame_info: StackFrameInfo,
     ) -> Result<Option<u64>, DebugError> {
+        if debug_info.is_avr
+            && let Some(frame_base) = self.avr_frame_base(&frame_info)
+        {
+            return Ok(Some(frame_base));
+        }
+
         match self.unit_info.extract_location(
             debug_info,
             &self.function_die,
@@ -279,6 +285,46 @@ impl<'a> FunctionDie<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// The frame base of a function compiled for an AVR.
+    ///
+    /// avr-gcc writes `DW_AT_frame_base` as `DW_OP_reg28`, and neither half of
+    /// that means what it says. Register 28 is the low byte of the Y register,
+    /// but the frame base is the whole 16-bit pair, and the frame starts one
+    /// byte above it because the stack pointer points at the next free byte.
+    ///
+    /// Evaluating the expression the ordinary way therefore yields the low byte
+    /// of Y on its own. On an AVR128DA64 with `Y = 0x7fbb` that is `0xbb`, which
+    /// is not even in the data space, so locals get read out of flash and come
+    /// back as program bytes.
+    ///
+    /// The frame pointer register already holds Y as a data space address, so
+    /// this only has to add the one byte. Functions that do not use
+    /// `DW_OP_reg28` are left to the ordinary path.
+    fn avr_frame_base(&self, frame_info: &StackFrameInfo) -> Option<u64> {
+        const DW_OP_REG28: u8 = 0x6c;
+
+        let attribute = collapsed_attribute(
+            &self.function_die,
+            self.specification_die.as_ref().map(|(_, die)| die),
+            gimli::DW_AT_frame_base,
+        )?;
+
+        let gimli::AttributeValue::Exprloc(expression) = attribute.value() else {
+            return None;
+        };
+
+        use gimli::Reader as _;
+
+        if expression.0.to_slice().ok()?.as_ref() != [DW_OP_REG28] {
+            return None;
+        }
+
+        let frame_pointer = frame_info.registers.get_frame_pointer()?;
+        let y: u64 = frame_pointer.value?.try_into().ok()?;
+
+        y.checked_add(1)
     }
 
     /// Returns the parent DIE offset of the function's declaration, together with the unit

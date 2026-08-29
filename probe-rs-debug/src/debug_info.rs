@@ -50,6 +50,11 @@ pub struct DebugInfo {
     /// Wrapped in a [`Mutex`] because `addr2line::Loader` is `Send` but not
     /// `Sync`, while [`DebugInfo`] must be both so an RPC server can share it.
     pub(crate) addr2line: Option<Mutex<addr2line::Loader>>,
+
+    /// Whether the binary is for an AVR, which needs its own frame base rule.
+    ///
+    /// See [`crate::function_die::FunctionDie::frame_base`].
+    pub(crate) is_avr: bool,
 }
 
 impl DebugInfo {
@@ -65,6 +70,8 @@ impl DebugInfo {
     /// Parse debug information directly from a buffer containing an ELF file.
     pub fn from_raw(data: &[u8]) -> Result<Self, DebugError> {
         let object = object::File::parse(data)?;
+
+        let is_avr = object.architecture() == object::Architecture::Avr;
 
         let endianness = if object.is_little_endian() {
             RunTimeEndian::Little
@@ -123,6 +130,7 @@ impl DebugInfo {
             unit_infos,
             endianness,
             addr2line: None,
+            is_avr,
         })
     }
 
@@ -158,6 +166,7 @@ impl DebugInfo {
                 unit_infos: Vec::new(),
                 endianness,
                 addr2line: None,
+                is_avr: false,
             })
         };
 
