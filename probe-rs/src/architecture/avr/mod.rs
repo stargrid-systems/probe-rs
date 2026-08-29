@@ -49,6 +49,51 @@ pub mod sequences;
 /// How long to wait between polls while waiting for the core to stop.
 const HALT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+/// How many software breakpoints the driver will plant.
+///
+/// There is no limit in the part, because a software breakpoint is just a
+/// `BREAK` written over an instruction. The limit is the flash: every plant and
+/// every removal costs an erase and program cycle of the page it lands in, and
+/// some of these parts are rated for as few as 1000. A small number keeps that
+/// bounded while still lifting the ceiling well above the two the hardware has.
+pub const SW_BREAKPOINT_SLOTS: usize = 4;
+
+/// The flash page containing `address`, and the offset of `address` into it.
+///
+/// Writing one instruction word means reading its whole page, patching it and
+/// writing it back, because `WriteProgmem` erases and programs a page at a
+/// time. Getting this wrong does not fail loudly, it writes a page to the wrong
+/// place, so it is worth pinning.
+///
+/// # Examples
+///
+/// ```
+/// use probe_rs::architecture::avr::page_span;
+///
+/// // A 512 byte page on an AVR-Dx part.
+/// assert_eq!(page_span(0x356, 512), (0x200, 0x156));
+/// // The first word of a page.
+/// assert_eq!(page_span(0x200, 512), (0x200, 0));
+/// // A 64 byte page on a tiny.
+/// assert_eq!(page_span(0x7a, 64), (0x40, 0x3a));
+/// ```
+pub fn page_span(address: u64, page_size: u32) -> (u64, usize) {
+    let page_size = u64::from(page_size);
+    let offset = address % page_size;
+
+    (address - offset, offset as usize)
+}
+
+/// A `BREAK` written over an instruction, and the instruction it replaced.
+#[derive(Clone, Copy, Debug)]
+struct SoftwareBreakpoint {
+    /// The byte address of the instruction.
+    address: u64,
+    /// The first word of the instruction that was there, needed both to put it
+    /// back and to step over the breakpoint without touching flash.
+    original: u16,
+}
+
 /// The state of an AVR core that outlives a single core handle.
 #[derive(Debug)]
 pub struct AvrCoreState {
@@ -70,6 +115,9 @@ pub struct AvrCoreState {
 
     /// The debug revision, once it has been read off the part.
     ocd_version: Option<OcdVersion>,
+
+    /// The software breakpoints planted in flash.
+    sw_breakpoints: [Option<SoftwareBreakpoint>; SW_BREAKPOINT_SLOTS],
 }
 
 impl AvrCoreState {
@@ -80,6 +128,7 @@ impl AvrCoreState {
             breakpoints_enabled: false,
             expecting_step: false,
             ocd_version: None,
+            sw_breakpoints: [None; SW_BREAKPOINT_SLOTS],
         }
     }
 }
@@ -141,6 +190,105 @@ impl<'probe> Avr<'probe> {
     fn write_ocd_16(&mut self, offset: u64, value: u16) -> Result<(), Error> {
         self.interface
             .write_8(ocd::address(offset), &value.to_le_bytes())
+    }
+
+    /// Reads the instruction word at a byte address in flash.
+    fn read_flash_word(&mut self, address: u64) -> Result<u16, Error> {
+        let mut word = [0u8; 2];
+        self.interface.read_flash(address, &mut word)?;
+
+        Ok(u16::from_le_bytes(word))
+    }
+
+    /// Writes one instruction word, keeping the rest of its page.
+    ///
+    /// `WriteProgmem` erases and programs a whole page, so a single word costs
+    /// a read of the page, a patch, and a write back. This is the expensive
+    /// half of a software breakpoint and the reason there are only
+    /// [`SW_BREAKPOINT_SLOTS`] of them.
+    fn write_flash_word(&mut self, address: u64, word: u16) -> Result<(), Error> {
+        let page_size = self.interface.family().flash_page_size();
+        let (page, offset) = page_span(address, page_size);
+
+        let mut buffer = vec![0u8; page_size as usize];
+        self.interface.read_flash(page, &mut buffer)?;
+        buffer[offset..offset + 2].copy_from_slice(&word.to_le_bytes());
+        self.interface.write_flash(page, &buffer)?;
+
+        Ok(())
+    }
+
+    /// The software breakpoint planted at `address`, if there is one.
+    fn software_breakpoint_at(&self, address: u64) -> Option<SoftwareBreakpoint> {
+        self.state
+            .sw_breakpoints
+            .iter()
+            .flatten()
+            .find(|breakpoint| breakpoint.address == address)
+            .copied()
+    }
+
+    /// Gets past a `BREAK` at the program counter without touching flash.
+    ///
+    /// The instruction the `BREAK` replaced is injected instead, so the core
+    /// executes it from [`ocd::INSN0`] and moves on. Without this, resuming
+    /// would mean writing flash twice on every hit, and the erase budget on
+    /// these parts does not allow that.
+    ///
+    /// A two-word instruction needs no special handling. Only its first word
+    /// was overwritten, so injecting that word alone leaves the part to fetch
+    /// the second from flash, where it still is.
+    fn step_over_software_breakpoint(&mut self) -> Result<bool, Error> {
+        let pc = self.read_core_reg(PC.id)?.try_into()?;
+        let Some(breakpoint) = self.software_breakpoint_at(pc) else {
+            return Ok(false);
+        };
+
+        self.interface.inject_instruction(breakpoint.original)?;
+        self.interface.step()?;
+
+        Ok(true)
+    }
+
+    /// Writes a `BREAK` over the instruction at `address`.
+    ///
+    /// Trapping on `BREAK` is enabled from the moment debug mode is entered, so
+    /// nothing has to be armed. What this costs is an erase and program cycle
+    /// of the page the address lands in, both now and again when the
+    /// breakpoint is removed.
+    fn plant_software_breakpoint(&mut self, slot: usize, address: u64) -> Result<(), Error> {
+        let original = self.read_flash_word(address)?;
+
+        if original == ocd::BREAK_INSTRUCTION {
+            return Err(Error::Other(format!(
+                "There is already a BREAK at {address:#x}. Flash was left in a \
+                 state a previous session did not clean up, so the instruction \
+                 that belongs there is lost."
+            )));
+        }
+
+        tracing::warn!(
+            "Planting a software breakpoint at {address:#x}. Both hardware units are \
+             in use, so this writes flash, and removing it writes flash again. Some \
+             AVR parts are rated for as few as 1000 erase cycles."
+        );
+
+        self.write_flash_word(address, ocd::BREAK_INSTRUCTION)?;
+        self.state.sw_breakpoints[slot] = Some(SoftwareBreakpoint { address, original });
+
+        Ok(())
+    }
+
+    /// Puts back the instruction a software breakpoint replaced.
+    fn remove_software_breakpoint(&mut self, slot: usize) -> Result<(), Error> {
+        let Some(breakpoint) = self.state.sw_breakpoints[slot] else {
+            return Ok(());
+        };
+
+        self.write_flash_word(breakpoint.address, breakpoint.original)?;
+        self.state.sw_breakpoints[slot] = None;
+
+        Ok(())
     }
 
     /// Sets or clears bits in `TRAPEN`, leaving the rest of it alone.
@@ -334,6 +482,8 @@ impl CoreInterface for Avr<'_> {
     }
 
     fn run(&mut self) -> Result<(), Error> {
+        // Stopped on a planted BREAK, the core would hit it again immediately.
+        self.step_over_software_breakpoint()?;
         self.state.expecting_step = false;
 
         Ok(self.interface.run()?)
@@ -357,6 +507,14 @@ impl CoreInterface for Avr<'_> {
     }
 
     fn step(&mut self) -> Result<CoreInformation, Error> {
+        // Stepping off a planted BREAK is the injected instruction itself, so
+        // there is nothing left to step once that has run.
+        if self.step_over_software_breakpoint()? {
+            self.state.expecting_step = true;
+
+            return self.core_info();
+        }
+
         // The script sets the step trap, resumes, and waits for the halt, so the
         // core is stopped again by the time this returns.
         self.interface.step()?;
@@ -420,12 +578,25 @@ impl CoreInterface for Avr<'_> {
         Ok(())
     }
 
+    /// The two hardware units, then the software slots.
+    ///
+    /// The order matters. `Core::set_hw_breakpoint` takes the first free slot,
+    /// so the free hardware units go first and flash is only written once they
+    /// are gone.
     fn available_breakpoint_units(&mut self) -> Result<u32, Error> {
-        Ok(HW_BREAKPOINT_UNITS as u32)
+        Ok((HW_BREAKPOINT_UNITS + SW_BREAKPOINT_SLOTS) as u32)
     }
 
     fn hw_breakpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
-        Ok(self.state.hw_breakpoints.to_vec())
+        let mut breakpoints = self.state.hw_breakpoints.to_vec();
+        breakpoints.extend(
+            self.state
+                .sw_breakpoints
+                .iter()
+                .map(|slot| slot.map(|breakpoint| breakpoint.address)),
+        );
+
+        Ok(breakpoints)
     }
 
     fn enable_breakpoints(&mut self, state: bool) -> Result<(), Error> {
@@ -439,6 +610,10 @@ impl CoreInterface for Avr<'_> {
     }
 
     fn set_hw_breakpoint(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
+        if let Some(slot) = unit_index.checked_sub(HW_BREAKPOINT_UNITS) {
+            return self.plant_software_breakpoint(slot, addr);
+        }
+
         let word_address = Self::byte_to_word_address(addr);
         self.interface.set_hw_breakpoint(unit_index, word_address)?;
         self.state.hw_breakpoints[unit_index] = Some(addr);
@@ -454,6 +629,10 @@ impl CoreInterface for Avr<'_> {
     }
 
     fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        if let Some(slot) = unit_index.checked_sub(HW_BREAKPOINT_UNITS) {
+            return self.remove_software_breakpoint(slot);
+        }
+
         self.interface.clear_hw_breakpoint(unit_index)?;
         self.state.hw_breakpoints[unit_index] = None;
 
@@ -529,6 +708,30 @@ impl CoreInterface for Avr<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A patched page must start on a page boundary and the word being patched
+    /// must land inside it, or a software breakpoint writes over the wrong
+    /// instructions. Both page sizes in use are covered.
+    #[test]
+    fn a_patched_word_lands_inside_its_own_page() {
+        for page_size in [64u32, 512] {
+            for address in (0..2048).step_by(2) {
+                let (page, offset) = page_span(address, page_size);
+
+                assert_eq!(page % u64::from(page_size), 0, "{address:#x}/{page_size}");
+                assert_eq!(page + offset as u64, address);
+                // Two bytes are written, so the word may not straddle the end.
+                assert!(offset + 2 <= page_size as usize, "{address:#x}/{page_size}");
+            }
+        }
+    }
+
+    /// The addresses of the software breakpoint run on an AVR128DA64.
+    #[test]
+    fn the_measured_software_breakpoint_page() {
+        // The BREAK went to 0x356, which is 0x156 into the page at 0x200.
+        assert_eq!(page_span(0x356, 512), (0x200, 0x156));
+    }
 
     /// The core counts instruction words and everything above it counts bytes.
     /// These are the two directions of that, and both were seen on hardware.
