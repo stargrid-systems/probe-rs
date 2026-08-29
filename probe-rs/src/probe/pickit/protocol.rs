@@ -31,9 +31,6 @@ const RESPONSE_LEN: usize = 512;
 /// The tool sets this in the first word of every response it understood.
 const STATUS_OK: u32 = 0x0d;
 
-/// Marks a response that carries its result inline instead of on the data pipe.
-const INLINE_MARKER: u32 = 0xa5a5_a5a5;
-
 /// The status value the tool expects between a data phase and `script done`.
 const ERROR_STATUS_KEY: &str = "ERROR_STATUS_KEY";
 
@@ -114,7 +111,6 @@ impl Params<'_> {
 #[derive(Clone, Debug)]
 pub struct Response {
     payload: Vec<u8>,
-    inline: bool,
 }
 
 impl Response {
@@ -132,7 +128,6 @@ impl Response {
 
         Ok(Self {
             payload: raw[16..length].to_vec(),
-            inline: word(raw, 12) == INLINE_MARKER,
         })
     }
 
@@ -149,11 +144,11 @@ impl Response {
     /// Short results do not use the data endpoint. `GetDeviceID` returns its
     /// four bytes this way. The slice is empty when the response carries no
     /// inline result.
+    ///
+    /// The length word at payload offset 4 is what says whether a result is
+    /// there. The word before it is not a marker, whatever it looks like most
+    /// of the time, so nothing here may key on it.
     pub fn inline_data(&self) -> &[u8] {
-        if !self.inline {
-            return &[];
-        }
-
         let length = word(&self.payload, 4) as usize;
         let start = 8;
         let end = (start + length).min(self.payload.len());
@@ -607,19 +602,48 @@ mod test {
         ));
     }
 
-    #[test]
-    fn inline_data_is_found() {
+    /// Builds a response carrying four inline bytes, with `filler` in the word
+    /// the tool leaves at offset 12.
+    fn inline_response(filler: [u8; 4]) -> Vec<u8> {
         let mut raw = vec![0; 28];
         raw[0] = 0x0d;
         raw[8] = 28;
-        raw[12..16].copy_from_slice(&INLINE_MARKER.to_le_bytes());
+        raw[12..16].copy_from_slice(&filler);
         raw[20] = 4;
         raw[24..28].copy_from_slice(&[0x1e, 0x97, 0x07, 0x18]);
 
-        let response = Response::parse(&raw).unwrap();
+        raw
+    }
+
+    #[test]
+    fn inline_data_is_found() {
+        let response = Response::parse(&inline_response([0xa5; 4])).unwrap();
 
         assert!(response.check().is_ok());
         assert_eq!(response.inline_data(), &[0x1e, 0x97, 0x07, 0x18]);
+    }
+
+    /// The word at offset 12 reads `a5a5a5a5` most of the time, which made it
+    /// look like a marker for inline results. It is not. A DA64 answered
+    /// `GetHaltStatus` with `0xc0000101` there after a few dozen calls, and
+    /// treating that as "no inline result" lost the answer.
+    #[test]
+    fn inline_data_does_not_depend_on_the_word_before_it() {
+        let response = Response::parse(&inline_response([0x01, 0x01, 0x00, 0xc0])).unwrap();
+
+        assert_eq!(response.inline_data(), &[0x1e, 0x97, 0x07, 0x18]);
+    }
+
+    #[test]
+    fn a_response_without_inline_data_is_empty() {
+        let mut raw = vec![0; 24];
+        raw[0] = 0x0d;
+        raw[8] = 24;
+        raw[12..16].copy_from_slice(&[0xa5; 4]);
+
+        let response = Response::parse(&raw).unwrap();
+
+        assert!(response.inline_data().is_empty());
     }
 
     #[test]
