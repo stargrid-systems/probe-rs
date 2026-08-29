@@ -3,7 +3,11 @@ use crate::error;
 use std::ops::Range;
 
 /// Describes any error that happened during the or in preparation for the flashing procedure.
+///
+/// New variants are added as new targets and flashing paths appear, so this is
+/// `#[non_exhaustive]` and a match on it needs a catch-all arm.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum FlashError {
     /// No flash algorithm was found by the given name.
     #[error("The {name} target has no flash algorithm called {name}")]
