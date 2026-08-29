@@ -1770,9 +1770,11 @@ impl UnitInfo {
                 gimli::DW_AT_location
                 | gimli::DW_AT_frame_base
                 | gimli::DW_AT_data_member_location => match attr.value() {
-                    gimli::AttributeValue::Exprloc(expression) => self
-                        .evaluate_expression(memory, expression, frame_info)
-                        .convert_incomplete()?,
+                    gimli::AttributeValue::Exprloc(expression) => avr_data_space(
+                        debug_info,
+                        self.evaluate_expression(memory, expression, frame_info)
+                            .convert_incomplete()?,
+                    ),
 
                     gimli::AttributeValue::Udata(offset_from_location) => {
                         let location = if let VariableLocation::Address(address) = parent_location {
@@ -2483,5 +2485,39 @@ impl RangeExt for &mut gimli::RngListIter<GimliReader> {
 impl RangeExt for gimli::Range {
     fn contains(self, addr: u64) -> bool {
         self.begin <= addr && addr < self.end
+    }
+}
+
+/// Puts an AVR variable address back in the data space.
+///
+/// probe-rs separates the two AVR memories by placing the data space at
+/// [`AVR_DATA_SPACE`] and flash below it. avr-gcc tags addresses the same way in
+/// the ELF, but most compilation units it emits declare a two byte DWARF address
+/// size, and gimli masks every evaluated address down to that. The tag is gone by
+/// the time an expression finishes, so `Y = 0x807fbb` comes back as `0x7fbb` and
+/// the local it points at gets read out of flash.
+///
+/// Putting the tag back is safe because avr-gcc places read-only data in RAM as
+/// well, so a DWARF address on this target names the data space. Data that
+/// really does stay in flash needs a progmem attribute and an access path that
+/// does not go through here.
+///
+/// Addresses that already carry the tag are left alone, so a unit with a four
+/// byte address size is unaffected.
+fn avr_data_space(debug_info: &DebugInfo, result: ExpressionResult) -> ExpressionResult {
+    /// Where probe-rs puts the AVR data space.
+    const AVR_DATA_SPACE: u64 = 0x0080_0000;
+
+    if !debug_info.is_avr {
+        return result;
+    }
+
+    match result {
+        ExpressionResult::Location(VariableLocation::Address(address))
+            if address < AVR_DATA_SPACE =>
+        {
+            ExpressionResult::Location(VariableLocation::Address(address + AVR_DATA_SPACE))
+        }
+        other => other,
     }
 }
