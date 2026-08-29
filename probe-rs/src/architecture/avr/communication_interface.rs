@@ -29,6 +29,7 @@
 
 use std::fmt;
 
+use crate::architecture::avr::ocd;
 use crate::error::Error;
 use crate::memory::MemoryInterface;
 use crate::probe::DebugProbeError;
@@ -390,6 +391,39 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         }
 
         Ok(())
+    }
+
+    /// Makes the core run `instruction` on the next step, not the one in flash.
+    ///
+    /// The opcode goes into [`ocd::INSN0`], which is write only and clears
+    /// itself once the instruction has executed. The program counter advances
+    /// by one word, so the instruction in flash is skipped rather than
+    /// deferred.
+    ///
+    /// This is what makes a software breakpoint affordable. Stepping over a
+    /// planted `BREAK` would otherwise mean writing flash twice on every hit,
+    /// once to put the original instruction back and once to plant `BREAK`
+    /// again. Injecting the original instead costs nothing. Some of these parts
+    /// are rated for as few as 1000 erase cycles, so the difference is between
+    /// a breakpoint you can leave in place and one you cannot.
+    ///
+    /// Confirmed on an AVR128DA64: injecting `ldi r24, 0x42` at the reset
+    /// vector left `r24` holding `0x42`, advanced the program counter by one
+    /// word, and skipped the two-word `jmp` that flash holds there.
+    pub fn inject_instruction(&mut self, instruction: u16) -> Result<(), AvrError> {
+        self.write_data_8(ocd::address(ocd::INSN0), &instruction.to_le_bytes())
+    }
+
+    /// Injects a two-word instruction, supplying both words.
+    ///
+    /// The program counter then advances by one word rather than two, because
+    /// the part does not fetch the second word from flash. Injecting only the
+    /// first word of a two-word instruction is a different operation: the
+    /// second word comes from flash and the program counter advances by two.
+    /// Use [`AvrCommunicationInterface::inject_instruction`] for that.
+    pub fn inject_instruction_pair(&mut self, first: u16, second: u16) -> Result<(), AvrError> {
+        self.write_data_8(ocd::address(ocd::INSN0), &first.to_le_bytes())?;
+        self.write_data_8(ocd::address(ocd::INSN1), &second.to_le_bytes())
     }
 
     /// Reads the device signature and revision.

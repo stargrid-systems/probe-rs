@@ -26,7 +26,14 @@ pub const TRAPEN: u64 = 0x08;
 /// Why the core stopped, one 16-bit field, read only. See [`cause`].
 pub const CAUSE: u64 = 0x0C;
 /// The instruction to inject instead of the one in flash, write only.
+///
+/// See [`crate::architecture::avr::Avr::inject_instruction`].
 pub const INSN0: u64 = 0x10;
+/// The second word of an injected two-word instruction, write only.
+///
+/// Supplying it changes what the program counter does. See
+/// [`crate::architecture::avr::Avr::inject_instruction_pair`].
+pub const INSN1: u64 = 0x12;
 /// The program counter. Reads as the program counter plus one, see [`OcdVersion`].
 pub const PC: u64 = 0x14;
 /// The stack pointer, 16 bit.
@@ -223,6 +230,7 @@ mod tests {
         assert_eq!(address(TRAPEN), 0x80_0F88);
         assert_eq!(address(CAUSE), 0x80_0F8C);
         assert_eq!(address(INSN0), 0x80_0F90);
+        assert_eq!(address(INSN1), 0x80_0F92);
         assert_eq!(address(PC), 0x80_0F94);
         assert_eq!(address(SP), 0x80_0F98);
         assert_eq!(address(SREG), 0x80_0F9C);
