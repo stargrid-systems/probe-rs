@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: print_const_pointers
@@ -249,6 +250,7 @@ expression: stack_frames
               type_name: Unknown
               value: const void
   canonical_frame_address: 536875096
+  scanned: false
 - function_name: print_pointers
   source_location:
     path: "C:\\_Hobby\\probe-rs-test-c-firmware\\main.c"
@@ -480,6 +482,7 @@ expression: stack_frames
               Column: 24
             address: ~
   canonical_frame_address: 536875104
+  scanned: false
 - function_name: main
   source_location:
     path: "C:\\_Hobby\\probe-rs-test-c-firmware\\main.c"
@@ -706,6 +709,7 @@ expression: stack_frames
                   - Base: int
               value: "1819043144"
   canonical_frame_address: 536875112
+  scanned: false
 - function_name: Reset_Handler
   source_location:
     path: "C:\\_Hobby\\probe-rs-test-c-firmware\\Atmel\\Device_Startup\\startup_samd51.c"
@@ -955,6 +959,7 @@ expression: stack_frames
                       - Base: long unsigned int
               value: "484133903"
   canonical_frame_address: 536875128
+  scanned: false
 - function_name: Reset
   source_location: ~
   registers:
@@ -1138,3 +1143,4 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false

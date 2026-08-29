@@ -194,6 +194,7 @@ pub async fn variables(
                 registers: regs,
                 frame_base: top_frame.frame_base,
                 canonical_frame_address: top_frame.canonical_frame_address,
+                scanned: top_frame.scanned,
             });
         }
     }
@@ -209,6 +210,7 @@ pub async fn variables(
                     registers: &frame.registers,
                     frame_base: frame.frame_base,
                     canonical_frame_address: frame.canonical_frame_address,
+                    scanned: frame.scanned,
                 });
                 break;
             }
@@ -468,6 +470,7 @@ pub async fn evaluate(
 
     let frame_base = core_state.stack_frames[frame_index].frame_base;
     let cfa = core_state.stack_frames[frame_index].canonical_frame_address;
+    let scanned = core_state.stack_frames[frame_index].scanned;
     let frame_regs = core_state.stack_frames[frame_index].registers.clone();
 
     if let Some(cache) = core_state.stack_frames[frame_index]
@@ -482,6 +485,7 @@ pub async fn evaluate(
                 registers: &frame_regs,
                 frame_base,
                 canonical_frame_address: cfa,
+                scanned,
             },
         )
     {
@@ -490,11 +494,18 @@ pub async fn evaluate(
 
     if let Some(cache) = core_state.static_variables.as_mut()
         && let Some(resp) = {
-            let (top_base, top_cfa, top_regs) = core_state
+            let (top_base, top_cfa, top_regs, top_scanned) = core_state
                 .stack_frames
                 .first()
-                .map(|f| (f.frame_base, f.canonical_frame_address, f.registers.clone()))
-                .unwrap_or((None, None, DebugRegisters::default()));
+                .map(|f| {
+                    (
+                        f.frame_base,
+                        f.canonical_frame_address,
+                        f.registers.clone(),
+                        f.scanned,
+                    )
+                })
+                .unwrap_or((None, None, DebugRegisters::default(), false));
             resolve_expression(
                 &debug_info,
                 &mut core,
@@ -504,6 +515,7 @@ pub async fn evaluate(
                     registers: &top_regs,
                     frame_base: top_base,
                     canonical_frame_address: top_cfa,
+                    scanned: top_scanned,
                 },
             )
         }

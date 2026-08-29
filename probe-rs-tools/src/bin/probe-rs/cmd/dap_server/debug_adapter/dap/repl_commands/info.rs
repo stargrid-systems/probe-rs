@@ -315,6 +315,7 @@ mod test {
             is_inlined: false,
             local_variables: None,
             canonical_frame_address: Some(0x2010),
+            scanned: false,
         }
     }
 

@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: "{closure#0}"
@@ -362,6 +363,7 @@ expression: stack_frames
                     Base: bool
                   value: "false"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "with<!, panic_rtt_target::panic::{closure_env#0}>"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\critical-section-1.2.0\\src\\lib.rs"
@@ -763,6 +765,7 @@ expression: stack_frames
                     Base: u32
                   value: "Unimplemented: Get value of type Base(\"u32\") of (Some(4) bytes) at location <unknown value>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: panic
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\panic-rtt-target-0.2.0\\src\\lib.rs"
@@ -1114,6 +1117,7 @@ expression: stack_frames
                     Base: bool
                   value: "false"
   canonical_frame_address: ~
+  scanned: false
 - function_name: panic_fmt
   source_location:
     path: "C:\\Users\\bugad\\.rustup\\toolchains\\esp\\lib\\rustlib\\src\\rust\\library\\core\\src\\panicking.rs"
@@ -1542,6 +1546,7 @@ expression: stack_frames
                 Base: bool
               value: "false"
   canonical_frame_address: ~
+  scanned: false
 - function_name: p
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -1748,6 +1753,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: p
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -1954,6 +1960,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: p
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -2160,6 +2167,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: p
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -2366,6 +2374,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: p
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -2572,6 +2581,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: p
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -2778,6 +2788,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: "{async_fn#0}"
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -3257,6 +3268,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: "TaskStorage<s3::____embassy_main_task::{async_fn_env#0}>::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -4072,6 +4084,7 @@ expression: stack_frames
                                         Base: usize
                                       value: "< Probe(Other(\"The coredump does not include the memory for address 0x654ffe74 of size 0x8\")) >"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "{closure#0}"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -4818,6 +4831,7 @@ expression: stack_frames
                                 Base: u8
                               value: "0"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "RunQueue::dequeue_all<embassy_executor::raw::{impl#9}::poll::{closure_env#0}>"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\run_queue_atomics.rs"
@@ -5354,6 +5368,7 @@ expression: stack_frames
                                         Base: u8
                                       value: "0"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "SyncExecutor::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -5628,6 +5643,7 @@ expression: stack_frames
                         Pointer: "*mut ()"
                       value: "*mut () @ 0x00000004"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "Executor::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -5908,6 +5924,7 @@ expression: stack_frames
                             Pointer: "*mut ()"
                           value: "*mut () @ 0x00000004"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "Executor::run<s3::__xtensa_lx_rt_main::{closure_env#0}>"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\esp-hal-embassy-0.7.0\\src\\executor\\thread.rs"
@@ -6199,6 +6216,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: __xtensa_lx_rt_main
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -6565,6 +6583,7 @@ expression: stack_frames
                                     Pointer: "*mut ()"
                                   value: "*mut () @ 0x00000004"
   canonical_frame_address: ~
+  scanned: false
 - function_name: __xtensa_lx_rt_main_trampoline
   source_location:
     path: "C:\\_Espressif\\bug-repros\\generate\\s3\\src\\bin\\main.rs"
@@ -6760,6 +6779,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: Reset
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\xtensa-lx-rt-0.18.0\\src\\lib.rs"
@@ -6955,6 +6975,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: ESP32Reset
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\esp-hal-1.0.0-beta.0\\src\\soc\\esp32s3\\mod.rs"
@@ -7150,3 +7171,4 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false

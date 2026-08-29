@@ -18,6 +18,18 @@ pub struct StackFrameInfo<'a> {
 
     /// The value of the stack pointer just before the CALL instruction in the parent function.
     pub canonical_frame_address: Option<u64>,
+
+    /// True when this frame was recovered by scanning the stack instead of from
+    /// unwind information.
+    ///
+    /// Only the program counter and the stack pointer mean anything then. Every
+    /// other register, the frame pointer included, still holds the value the
+    /// innermost frame left in it, because nothing records where a callee put
+    /// its caller's registers.
+    ///
+    /// That makes both the locals and the frame base of such a frame unknowable,
+    /// so they are withheld rather than guessed at. See [`StackFrame::scanned`].
+    pub scanned: bool,
 }
 
 /// A full stack frame with all its information contained.
@@ -47,6 +59,18 @@ pub struct StackFrame {
     pub local_variables: Option<VariableCache>,
     /// The value of the stack pointer just before the CALL instruction in the parent function.
     pub canonical_frame_address: Option<u64>,
+    /// True when this frame came from a stack scan rather than unwind info.
+    ///
+    /// The function name, the source location and the program counter are still
+    /// good. The locals are not, so they are not offered.
+    ///
+    /// Measured on an AVR128DA64, where the scan restores only the program
+    /// counter and the stack pointer. Every calling frame read its locals out of
+    /// the innermost frame's stack, because the frame base comes from the frame
+    /// pointer and the scan never restores it. A test firmware that filled every
+    /// level's buffer from the same value could not see the fault, because
+    /// reading the wrong frame's buffer gave the right-looking answer.
+    pub scanned: bool,
 }
 
 impl std::fmt::Display for StackFrame {

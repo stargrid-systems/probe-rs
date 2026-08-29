@@ -1706,9 +1706,15 @@ impl UnitInfo {
                     child_variable.set_value(value_from_expression);
                 }
                 ExpressionResult::Location(VariableLocation::Unavailable) => {
-                    child_variable.set_value(VariableValue::Error(
-                        "<value optimized away by compiler, out of scope, or dropped>".to_string(),
-                    ));
+                    // A scanned frame has no frame base, so anything relative to
+                    // one lands here. Blaming the optimiser for that would be a
+                    // guess presented as a fact.
+                    let reason = if frame_info.scanned {
+                        Self::SCANNED_FRAME
+                    } else {
+                        "<value optimized away by compiler, out of scope, or dropped>"
+                    };
+                    child_variable.set_value(VariableValue::Error(reason.to_string()));
                 }
                 ExpressionResult::Location(
                     ref location @ VariableLocation::Error(ref error_message)
@@ -1732,6 +1738,13 @@ impl UnitInfo {
 
         Ok(())
     }
+
+    /// Why a variable in a scanned frame has no value.
+    ///
+    /// Saying it was optimised away, which is the generic answer for a location
+    /// that will not resolve, would be a guess dressed up as a fact.
+    const SCANNED_FRAME: &'static str =
+        "<no value: this frame was recovered by scanning the stack, so neither its frame base nor its registers are recoverable>";
 
     /// - Find the location using either DW_AT_location, DW_AT_data_member_location, or DW_AT_frame_base attribute.
     ///
@@ -1964,7 +1977,16 @@ impl UnitInfo {
                 ExpressionResult::Value(VariableValue::Valid(value))
             }
             Location::Register { register } => {
-                if let Some(value) = frame_info
+                if frame_info.scanned {
+                    // Reachable when an expression is evaluated outside the
+                    // variable path, such as the REPL. The register file holds
+                    // the innermost frame's values, and whether this one
+                    // survived the call depends only on which register the
+                    // compiler happened to pick.
+                    ExpressionResult::Location(VariableLocation::Unsupported(
+                        Self::SCANNED_FRAME.to_string(),
+                    ))
+                } else if let Some(value) = frame_info
                     .registers
                     .get_register_by_dwarf_id(register.0)
                     .and_then(|register| register.value)

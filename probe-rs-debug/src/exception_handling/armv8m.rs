@@ -616,6 +616,7 @@ impl ExceptionInterface for ArmV8MExceptionHandler {
             is_inlined: false,
             local_variables: None,
             canonical_frame_address: None,
+            scanned: false,
         };
 
         Ok(Some(ExceptionInfo {

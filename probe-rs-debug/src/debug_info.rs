@@ -381,6 +381,7 @@ impl DebugInfo {
         &self,
         address: u64,
         unwind_registers: &DebugRegisters,
+        scanned: bool,
     ) -> Result<Vec<StackFrame>, DebugError> {
         let Some(ref addr2line) = self.addr2line else {
             return Ok(vec![]);
@@ -417,6 +418,7 @@ impl DebugInfo {
             is_inlined: false,
             local_variables: None,
             canonical_frame_address: None,
+            scanned,
         }])
     }
 
@@ -429,6 +431,7 @@ impl DebugInfo {
         address: u64,
         cfa: Option<u64>,
         unwind_registers: &DebugRegisters,
+        scanned: bool,
     ) -> Result<Vec<StackFrame>, DebugError> {
         // When reporting the address, we format it as a hex string, with the width matching
         // the configured size of the datatype used in the `RegisterValue` address.
@@ -441,11 +444,11 @@ impl DebugInfo {
 
         let Ok((unit_info, functions)) = self.get_function_dies(address) else {
             // No function found at the given address.
-            return self.get_stackframe_from_symbols(address, unwind_registers);
+            return self.get_stackframe_from_symbols(address, unwind_registers, scanned);
         };
         if functions.is_empty() {
             // No function found at the given address.
-            return self.get_stackframe_from_symbols(address, unwind_registers);
+            return self.get_stackframe_from_symbols(address, unwind_registers, scanned);
         }
 
         // The first function is the non-inlined function, and the rest are inlined functions.
@@ -457,6 +460,7 @@ impl DebugInfo {
                 registers: unwind_registers,
                 frame_base: None,
                 canonical_frame_address: cfa,
+                scanned,
             },
         )?;
 
@@ -525,6 +529,7 @@ impl DebugInfo {
                 is_inlined: function_die.is_inline(),
                 local_variables,
                 canonical_frame_address: cfa,
+                scanned,
             });
         }
 
@@ -563,6 +568,7 @@ impl DebugInfo {
             is_inlined: last_function.is_inline(),
             local_variables,
             canonical_frame_address: cfa,
+            scanned,
         });
 
         Ok(frames)
@@ -626,6 +632,13 @@ impl DebugInfo {
 
         let mut unwind_registers = initial_registers;
 
+        // Set once the unwind falls back to scanning the stack, because from
+        // then on the registers are the innermost frame's rather than this
+        // frame's. Only raised for AVR, which is where the consequences were
+        // measured. The other architectures that can reach the same fallback
+        // keep their present behaviour until someone can test them.
+        let mut scanned = false;
+
         // Unwind [StackFrame]'s for as long as we can unwind a valid PC value.
         'unwind: while let Some(frame_pc_register_value) =
             unwind_registers.get_program_counter().and_then(|pc| {
@@ -662,7 +675,8 @@ impl DebugInfo {
 
             // PART 1-a: Prepare the `StackFrame`s that holds the current frame information.
             let cached_stack_frames =
-                match self.get_stackframe_info(memory, frame_pc, cfa, &unwind_registers) {
+                match self.get_stackframe_info(memory, frame_pc, cfa, &unwind_registers, scanned)
+                {
                     Ok(cached_stack_frames) => cached_stack_frames,
                     Err(e) => {
                         tracing::error!("UNWIND: Unable to complete `StackFrame` information: {e}");
@@ -702,6 +716,7 @@ impl DebugInfo {
                     is_inlined: false,
                     local_variables: None,
                     canonical_frame_address: None,
+                    scanned,
                 });
             };
 
@@ -741,6 +756,12 @@ impl DebugInfo {
                         }
                         break 'unwind;
                     }
+
+                    // The scan recovers the program counter and the stack
+                    // pointer and nothing else, so from here on every other
+                    // register still belongs to the innermost frame. Raised for
+                    // AVR only, because that is where the damage was measured.
+                    scanned |= self.is_avr;
 
                     // Check for exception frames, same as PART 3 below.
                     // This is needed because the exception check in PART 3 only
@@ -852,6 +873,7 @@ impl DebugInfo {
                             is_inlined: false,
                             local_variables: None,
                             canonical_frame_address: None,
+                            scanned,
                         });
                         break 'unwind;
                     }
@@ -2103,6 +2125,7 @@ mod test {
                         registers: &frame.registers,
                         frame_base: frame.frame_base,
                         canonical_frame_address: frame.canonical_frame_address,
+                        scanned: frame.scanned,
                     },
                 );
             }
@@ -2140,6 +2163,7 @@ mod test {
                 registers: &initial_registers,
                 frame_base: None,
                 canonical_frame_address: None,
+                scanned: false,
             },
         );
         // Using YAML output because it is easier to read than the default snapshot output,

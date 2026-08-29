@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: software_breakpoint
@@ -214,6 +215,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 536887088
+  scanned: false
 - function_name: __cortex_m_rt_SVCall
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/nRF52833_xxAA.rs
@@ -426,6 +428,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 536887088
+  scanned: false
 - function_name: __cortex_m_rt_SVCall_trampoline
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/nRF52833_xxAA.rs
@@ -632,6 +635,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 536887096
+  scanned: false
 - function_name: SVC
   source_location: ~
   registers:
@@ -833,6 +837,7 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: trigger_supervisor_call
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/nRF52833_xxAA.rs
@@ -1043,6 +1048,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 536887136
+  scanned: false
 - function_name: __cortex_m_rt_main
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/nRF52833_xxAA.rs
@@ -1723,6 +1729,7 @@ expression: stack_frames
                 Struct: CLOCK
               value: CLOCK @ 0x20003F76
   canonical_frame_address: 536887288
+  scanned: false
 - function_name: "__cortex_m_rt_main_trampoline : ERROR: UNWIND: Failed to read value for register R14/LR from address 0x0000000020003ffc (4 bytes): The coredump does not include the memory for address 0x20003ffc of size 0x4"
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/nRF52833_xxAA.rs
@@ -1929,3 +1936,4 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 536887296
+  scanned: false

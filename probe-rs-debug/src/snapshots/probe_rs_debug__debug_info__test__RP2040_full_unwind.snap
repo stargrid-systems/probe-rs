@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: test_deep_stack
@@ -235,6 +236,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 536883184
+  scanned: false
 - function_name: test_deep_stack
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/lib.rs
@@ -462,6 +464,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 536883328
+  scanned: false
 - function_name: test_deep_stack
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/lib.rs
@@ -689,6 +692,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 536883472
+  scanned: false
 - function_name: test_deep_stack
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/lib.rs
@@ -916,6 +920,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 536883616
+  scanned: false
 - function_name: test_deep_stack
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/lib.rs
@@ -1143,6 +1148,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 536883760
+  scanned: false
 - function_name: test_deep_stack
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/lib.rs
@@ -1370,6 +1376,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 536883904
+  scanned: false
 - function_name: setup_data_types
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/lib.rs
@@ -4510,6 +4517,7 @@ expression: stack_frames
                                         Base: usize
                                       value: "1"
   canonical_frame_address: 536886968
+  scanned: false
 - function_name: __cortex_m_rt_main
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/RP2040.rs
@@ -5321,6 +5329,7 @@ expression: stack_frames
                         Base: u32
                       value: "46875"
   canonical_frame_address: 536887288
+  scanned: false
 - function_name: "__cortex_m_rt_main_trampoline : ERROR: UNWIND: Failed to read value for register R14/LR from address 0x0000000020003ffc (4 bytes): The coredump does not include the memory for address 0x20003ffc of size 0x4"
   source_location:
     path: /Users/jacknoppe/dev/debug/probe-rs-debugger-test/src/bin/RP2040.rs
@@ -5527,3 +5536,4 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 536887296
+  scanned: false

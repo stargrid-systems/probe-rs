@@ -115,6 +115,9 @@ pub struct RichStackTraceFrame {
     pub location: Option<SourceLocation>,
     pub frame_base: Option<u64>,
     pub canonical_frame_address: Option<u64>,
+    /// True when the frame came from a stack scan rather than unwind info, in
+    /// which case its locals are not resolvable. See `probe_rs_debug::StackFrame`.
+    pub scanned: bool,
     pub registers: Vec<WireDebugRegister>,
     /// Server-assigned frame id (also the DAP `frameId` and the registers
     /// scope `variablesReference`).

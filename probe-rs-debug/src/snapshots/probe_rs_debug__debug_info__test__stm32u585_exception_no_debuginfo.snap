@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: "<unknown function @ 0x08000858>"
@@ -205,6 +206,7 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: SVC
   source_location: ~
   registers:
@@ -408,6 +410,7 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: read_volatile<u32>
   source_location:
     path: /home/dirbaio/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs
@@ -630,6 +633,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: nodbg_b
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/exception_no_debuginfo.rs
@@ -842,6 +846,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: nodbg_a
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/exception_no_debuginfo.rs
@@ -1054,3 +1059,4 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false

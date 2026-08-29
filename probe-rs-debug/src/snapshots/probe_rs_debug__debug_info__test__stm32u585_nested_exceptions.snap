@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: __nop
@@ -213,6 +214,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657216
+  scanned: false
 - function_name: __nop
   source_location:
     path: "./asm/lib.rs"
@@ -425,6 +427,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657216
+  scanned: false
 - function_name: nop
   source_location:
     path: /home/dirbaio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cortex-m-0.7.7/src/call_asm.rs
@@ -631,6 +634,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657224
+  scanned: false
 - function_name: hf_inner
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -837,6 +841,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657224
+  scanned: false
 - function_name: __cortex_m_rt_HardFault
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -1053,6 +1058,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 537657232
+  scanned: false
 - function_name: __cortex_m_rt_HardFault_trampoline
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -1269,6 +1275,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 537657232
+  scanned: false
 - function_name: "HardFault <Cause: Escalated BusFault (Precise data access error) at location: 0xfffffff0>"
   source_location: ~
   registers:
@@ -1470,6 +1477,7 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: write_volatile<u32>
   source_location:
     path: /home/dirbaio/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs
@@ -1707,6 +1715,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 537657272
+  scanned: false
 - function_name: svc_inner
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -1917,6 +1926,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657272
+  scanned: false
 - function_name: SVC
   source_location: ~
   registers:
@@ -2118,6 +2128,7 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false
 - function_name: read_volatile<u32>
   source_location:
     path: /home/dirbaio/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs
@@ -2338,6 +2349,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 537657312
+  scanned: false
 - function_name: level_c
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -2548,6 +2560,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657312
+  scanned: false
 - function_name: level_b
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -2754,6 +2767,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657320
+  scanned: false
 - function_name: level_a
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -2960,6 +2974,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657328
+  scanned: false
 - function_name: __cortex_m_rt_main
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -3166,6 +3181,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657336
+  scanned: false
 - function_name: __cortex_m_rt_main_trampoline
   source_location:
     path: /tmp/claude-1000/-home-dirbaio-probe-rs/25e92516-66c7-4ad6-a7d6-f01d09e4b941/scratchpad/minimal-fw/src/bin/nested_exceptions.rs
@@ -3372,6 +3388,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: 537657344
+  scanned: false
 - function_name: Reset
   source_location: ~
   registers:
@@ -3569,3 +3586,4 @@ expression: stack_frames
   is_inlined: false
   local_variables: ~
   canonical_frame_address: ~
+  scanned: false

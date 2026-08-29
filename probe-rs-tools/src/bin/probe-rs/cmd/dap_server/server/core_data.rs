@@ -76,6 +76,7 @@ fn stack_frame_display_cache_is_invalidated_before_replacement() {
             is_inlined: false,
             local_variables: None,
             canonical_frame_address: None,
+            scanned: false,
         }
     }
 

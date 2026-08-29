@@ -1,5 +1,6 @@
 ---
 source: probe-rs-debug/src/debug_info.rs
+assertion_line: 2136
 expression: stack_frames
 ---
 - function_name: panic_handler
@@ -508,6 +509,7 @@ expression: stack_frames
                     Base: bool
                   value: "false"
   canonical_frame_address: 1082582272
+  scanned: false
 - function_name: panic_fmt
   source_location:
     path: /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs
@@ -832,6 +834,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: panic_fmt
   source_location:
     path: /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs
@@ -1156,6 +1159,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: panic_fmt
   source_location:
     path: /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs
@@ -1480,6 +1484,7 @@ expression: stack_frames
       type_name: Unknown
       value: "<unknown>"
   canonical_frame_address: ~
+  scanned: false
 - function_name: "{async_fn#0}"
   source_location:
     path: "C:\\_Espressif\\_Demos\\coredump-c6\\src\\bin\\main.rs"
@@ -1906,6 +1911,7 @@ expression: stack_frames
                     Enum: Unit
                   value: "Unit::Unit0"
   canonical_frame_address: 1082582304
+  scanned: false
 - function_name: "TaskStorage<coredump_c6::____embassy_main_task::{async_fn_env#0}>::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -2346,6 +2352,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582304
+  scanned: false
 - function_name: "{async_fn#0}"
   source_location:
     path: "C:\\_Espressif\\_Demos\\coredump-c6\\src\\bin\\main.rs"
@@ -2790,6 +2797,7 @@ expression: stack_frames
                     Enum: Unit
                   value: "Unit::Unit0"
   canonical_frame_address: 1082582432
+  scanned: false
 - function_name: "TaskStorage<coredump_c6::____embassy_main_task::{async_fn_env#0}>::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -3230,6 +3238,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582432
+  scanned: false
 - function_name: "Option<unsafe fn(embassy_executor::raw::TaskRef)>::unwrap_unchecked"
   source_location:
     path: "C:\\Users\\bugad\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\src\\rust\\library\\core\\src\\option.rs"
@@ -3564,6 +3573,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582448
+  scanned: false
 - function_name: "{closure#0}"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -3907,6 +3917,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582448
+  scanned: false
 - function_name: "RunQueue::dequeue_all<embassy_executor::raw::{impl#9}::poll::{closure_env#0}>"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\run_queue_atomics.rs"
@@ -4275,6 +4286,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582448
+  scanned: false
 - function_name: "SyncExecutor::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -4609,6 +4621,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582448
+  scanned: false
 - function_name: "Executor::poll"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\embassy-executor-0.7.0\\src\\raw\\mod.rs"
@@ -4943,6 +4956,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582448
+  scanned: false
 - function_name: "Executor::run<coredump_c6::__risc_v_rt__main::{closure_env#0}>"
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\esp-hal-embassy-0.7.0\\src\\executor\\thread.rs"
@@ -5363,6 +5377,7 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582464
+  scanned: false
 - function_name: __risc_v_rt__main
   source_location:
     path: "C:\\_Espressif\\_Demos\\coredump-c6\\src\\bin\\main.rs"
@@ -5807,6 +5822,7 @@ expression: stack_frames
                   type_name: Unknown
                   value: "< Location Value not supported for referenced variables. >"
   canonical_frame_address: 1082582480
+  scanned: false
 - function_name: hal_main
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\esp-hal-1.0.0-beta.0\\src\\lib.rs"
@@ -6173,6 +6189,7 @@ expression: stack_frames
                 Base: u32
               value: "Error: This is a bug! Attempted to evaluate a Variable with no type or no memory location"
   canonical_frame_address: 1082582496
+  scanned: false
 - function_name: start_rust
   source_location:
     path: "C:\\Users\\bugad\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\esp-riscv-rt-0.10.0\\src\\lib.rs"
@@ -6523,3 +6540,4 @@ expression: stack_frames
             column: ~
             address: ~
   canonical_frame_address: 1082582528
+  scanned: false

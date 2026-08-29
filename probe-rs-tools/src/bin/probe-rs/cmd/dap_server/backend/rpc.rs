@@ -669,6 +669,7 @@ impl RpcBackend {
                     is_inlined: wf.is_inlined,
                     local_variables: None,
                     canonical_frame_address: cfa,
+                    scanned: wf.scanned,
                 });
             }
         }

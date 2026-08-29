@@ -168,7 +168,13 @@ pub async fn take_rich_stack_trace(
                 let step_pc: u64 = stack_frames[group_start].pc.try_into().unwrap_or(0);
                 let cfa = stack_frames[group_start].canonical_frame_address;
                 let mut chain = debug_info
-                    .get_stackframe_info(&mut core, step_pc, cfa, &group_regs)
+                    .get_stackframe_info(
+                        &mut core,
+                        step_pc,
+                        cfa,
+                        &group_regs,
+                        stack_frames[group_start].scanned,
+                    )
                     .ok()
                     .unwrap_or_default();
                 // DIE order is outermost-first; wire order is innermost-first.
@@ -196,6 +202,7 @@ pub async fn take_rich_stack_trace(
                         .map(convert::to_wire_source_location),
                     frame_base: f.frame_base,
                     canonical_frame_address: f.canonical_frame_address,
+                    scanned: f.scanned,
                     registers: f
                         .registers
                         .0

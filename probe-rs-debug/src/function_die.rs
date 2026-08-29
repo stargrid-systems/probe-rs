@@ -266,6 +266,14 @@ impl<'a> FunctionDie<'a> {
         memory: &mut dyn MemoryInterface,
         frame_info: StackFrameInfo,
     ) -> Result<Option<u64>, DebugError> {
+        if frame_info.scanned {
+            // The frame base comes from the frame pointer, and a scanned frame
+            // does not have its own. Reading one anyway points every local in
+            // this frame at the innermost frame's stack, which reads as
+            // plausible data rather than as an error.
+            return Ok(None);
+        }
+
         if debug_info.is_avr
             && let Some(frame_base) = self.avr_frame_base(&frame_info)
         {

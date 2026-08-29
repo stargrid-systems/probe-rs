@@ -101,6 +101,7 @@ pub(crate) fn exception_details(
                 is_inlined: false,
                 local_variables: None,
                 canonical_frame_address: None,
+                scanned: false,
             },
         }));
     }
@@ -130,6 +131,7 @@ pub(crate) fn exception_details(
         is_inlined: false,
         local_variables: None,
         canonical_frame_address: None,
+        scanned: false,
     };
 
     // Now we can update the stack pointer also, but
