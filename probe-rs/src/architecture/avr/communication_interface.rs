@@ -173,6 +173,14 @@ pub enum AvrError {
 
     /// Breakpoint unit {0} does not exist. An AVR has two.
     NoSuchBreakpointUnit(usize),
+
+    /// Flash is word organised, so a write needs an even address and an even length, but got address {address:#x} and length {length}.
+    UnalignedFlashWrite {
+        /// The address of the access.
+        address: u64,
+        /// The length of the access in bytes.
+        length: usize,
+    },
 }
 
 impl From<AvrError> for crate::Error {
@@ -379,10 +387,40 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// `address` is a probe-rs address, so flash starts at zero. Addressing is
     /// linear across the whole device, so this also reaches the part of flash
     /// that is not mapped into the data space.
+    ///
+    /// Any address and any length work here. The script underneath accepts
+    /// neither, so this widens the request out to whole words and hands back
+    /// the slice that was asked for.
+    ///
+    /// # Why the request is widened
+    ///
+    /// `ReadProgmem` reads `length / 2` words, rounded down, starting at the
+    /// address it is given. Flash is word organised and the script does not
+    /// check either end of the request, so both go wrong on their own:
+    ///
+    /// - An odd address reads misaligned words, and each one comes back as the
+    ///   byte at that address twice. On an ATtiny406, four bytes at `0x41` read
+    ///   as `d0 d0 c0 c0` where the flash really holds `d0 13 c0 dd`.
+    /// - An odd length returns one byte less than was asked for, and a length
+    ///   of one returns nothing at all. Nothing is the dangerous case: the tool
+    ///   never writes to the data pipe, the host waits for a byte that is not
+    ///   coming, and the timeout hangs the tool. Only a replug clears it.
+    ///
+    /// A one-byte read is exactly what asking the debugger for a `u8` in flash
+    /// produces, so this is reachable from ordinary use.
     pub fn read_flash(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
-        let tool_address = to_tool_flash_address(self.state.family, address)?;
+        if data.is_empty() {
+            return Ok(());
+        }
 
-        self.read(ScriptName::ReadProgmem, tool_address, data)
+        let (start, skip, widened) = word_span(address, data.len());
+        let tool_address = to_tool_flash_address(self.state.family, start)?;
+
+        let mut words = vec![0; widened];
+        self.read(ScriptName::ReadProgmem, tool_address, &mut words)?;
+        data.copy_from_slice(&words[skip..skip + data.len()]);
+
+        Ok(())
     }
 
     /// Writes flash.
@@ -391,7 +429,20 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// into the bytecode rather than passed in. A write that does not cover a
     /// whole page leaves the rest of that page in an undefined state, so the
     /// caller has to align its writes itself.
+    ///
+    /// Both ends have to be even, for the reasons in
+    /// [`AvrCommunicationInterface::read_flash`]. A read can widen the request
+    /// and trim the answer, but a write cannot, because widening it would put
+    /// bytes into flash that the caller never asked to write. So this rejects
+    /// the access instead.
     pub fn write_flash(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
+        if !address.is_multiple_of(2) || !data.len().is_multiple_of(2) {
+            return Err(AvrError::UnalignedFlashWrite {
+                address,
+                length: data.len(),
+            });
+        }
+
         let tool_address = to_tool_flash_address(self.state.family, address)?;
 
         self.write(ScriptName::WriteProgmem, tool_address, data)
@@ -588,6 +639,31 @@ fn check_breakpoint_unit(unit: usize) -> Result<u32, AvrError> {
     }
 
     Ok(unit as u32)
+}
+
+/// The whole-word span that covers a flash request.
+///
+/// Returns the address to ask the script for, how many bytes of the answer to
+/// drop at the front, and how many bytes to ask for. See
+/// [`AvrCommunicationInterface::read_flash`] for why a flash read has to be
+/// widened at all.
+///
+/// # Examples
+///
+/// ```
+/// use probe_rs::architecture::avr::communication_interface::word_span;
+///
+/// // An aligned request is already a whole number of words.
+/// assert_eq!(word_span(0x40, 8), (0x40, 0, 8));
+/// // An odd address moves the request back a byte and drops that byte.
+/// assert_eq!(word_span(0x41, 2), (0x40, 1, 4));
+/// // An odd length rounds up, which is what stops a one-byte read hanging.
+/// assert_eq!(word_span(0x40, 1), (0x40, 0, 2));
+/// ```
+pub fn word_span(address: u64, len: usize) -> (u64, usize, usize) {
+    let skip = usize::from(!address.is_multiple_of(2));
+
+    (address - skip as u64, skip, (skip + len).next_multiple_of(2))
 }
 
 /// Wraps a probe-specific error so this module does not name the probe driver.
@@ -817,6 +893,29 @@ mod tests {
         assert_eq!(to_tool_flash_address(tiny, 0x40).unwrap(), 0x8040);
         // The last byte of the 4 KiB flash of an ATtiny406.
         assert_eq!(to_tool_flash_address(tiny, 0x0FFF).unwrap(), 0x8FFF);
+    }
+
+    /// Every widened span has to start on a word, cover a whole number of
+    /// words, and still contain the bytes that were asked for.
+    #[test]
+    fn a_widened_flash_read_covers_the_request() {
+        for address in 0..8u64 {
+            for len in 1..8usize {
+                let (start, skip, widened) = word_span(address, len);
+
+                assert!(start.is_multiple_of(2), "{address:#x} {len}");
+                assert!(widened.is_multiple_of(2), "{address:#x} {len}");
+                assert_eq!(start + skip as u64, address);
+                assert!(skip + len <= widened, "{address:#x} {len}");
+            }
+        }
+    }
+
+    /// A one-byte read is the case that hung a tool, so pin it on its own.
+    #[test]
+    fn a_one_byte_flash_read_asks_for_a_whole_word() {
+        assert_eq!(word_span(0x40, 1), (0x40, 0, 2));
+        assert_eq!(word_span(0x41, 1), (0x40, 1, 2));
     }
 
     /// The two spaces meet at the offset, and neither may cross into the other.
