@@ -58,6 +58,21 @@ const MAX_TOOL_ADDRESS: u64 = u32::MAX as u64;
 /// part cannot answer.
 const MAX_DATA_ADDRESS: u64 = 0xFFFF;
 
+/// The largest single access handed to one script run.
+///
+/// The memory scripts do a fully addressed UPDI access per element, so the time
+/// an access takes is set by how many bytes were asked for, not by USB. That
+/// makes an unbounded access a liability: ask for enough and it outlives the
+/// transport timeout, which latches the tool as hung when it was still working.
+///
+/// Splitting costs nothing measurable. The rate is flat against size, at
+/// 1.1 KiB/s for everything from 256 bytes to 3072 on an AVR128DA64, so the
+/// per-access overhead is already lost in the wire time.
+///
+/// This has to stay even, because a flash access is word organised. See
+/// [`AvrCommunicationInterface::read_flash`].
+const MAX_TRANSFER: usize = 512;
+
 /// How many hardware breakpoint units the debug block has.
 ///
 /// There are exactly two and there is no way around it.
@@ -378,8 +393,18 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     }
 
     /// Writes the data space one byte at a time.
+    ///
+    /// Split into [`MAX_TRANSFER`] blocks. Flash is deliberately not split this
+    /// way, because a flash write erases whole pages and the caller aligns it.
     pub fn write_data_8(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
-        self.write(ScriptName::WriteMem8, to_chip_data_address(address)?, data)
+        let chip = to_chip_data_address(address)?;
+
+        for (index, block) in data.chunks(MAX_TRANSFER).enumerate() {
+            let offset = (index * MAX_TRANSFER) as u32;
+            self.write(ScriptName::WriteMem8, chip + offset, block)?;
+        }
+
+        Ok(())
     }
 
     /// Reads flash.
@@ -593,21 +618,25 @@ impl<'probe> AvrCommunicationInterface<'probe> {
             return Ok(());
         }
 
-        tracing::trace!(
-            script = ?name,
-            address = format_args!("{tool_address:#010x}"),
-            len = data.len(),
-            "reading target memory"
-        );
+        for (index, block) in data.chunks_mut(MAX_TRANSFER).enumerate() {
+            let address = tool_address + (index * MAX_TRANSFER) as u32;
 
-        let params = [tool_address, data.len() as u32];
-        let read = self
-            .probe
-            .read(name, Params::Words(&params), data.len())
-            .map_err(probe_error)?;
+            tracing::trace!(
+                script = ?name,
+                address = format_args!("{address:#010x}"),
+                len = block.len(),
+                "reading target memory"
+            );
 
-        let len = read.len().min(data.len());
-        data[..len].copy_from_slice(&read[..len]);
+            let params = [address, block.len() as u32];
+            let read = self
+                .probe
+                .read(name, Params::Words(&params), block.len())
+                .map_err(probe_error)?;
+
+            let len = read.len().min(block.len());
+            block[..len].copy_from_slice(&read[..len]);
+        }
 
         Ok(())
     }
@@ -916,6 +945,14 @@ mod tests {
     fn a_one_byte_flash_read_asks_for_a_whole_word() {
         assert_eq!(word_span(0x40, 1), (0x40, 0, 2));
         assert_eq!(word_span(0x41, 1), (0x40, 1, 2));
+    }
+
+    /// A split must not land in the middle of a word, or a flash access on
+    /// either side of it reads misaligned. See `read_flash`.
+    #[test]
+    fn the_transfer_limit_is_a_whole_number_of_words() {
+        const { assert!(MAX_TRANSFER > 0) };
+        const { assert!(MAX_TRANSFER.is_multiple_of(2)) };
     }
 
     /// The two spaces meet at the offset, and neither may cross into the other.

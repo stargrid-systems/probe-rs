@@ -36,6 +36,24 @@ const ERROR_STATUS_KEY: &str = "ERROR_STATUS_KEY";
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a data phase is allowed to take, for a transfer of `len` bytes.
+///
+/// The wire sets the pace here, not USB. The memory scripts do a fully
+/// addressed UPDI access per element, which measures at about 0.9 ms a byte on
+/// an AVR128DA64, so the time a read takes is set by how much was asked for.
+///
+/// A fixed timeout therefore becomes a self-inflicted hang as soon as a read is
+/// big enough. Reading 3072 bytes takes 2.70 s and passes. Asking for 4096
+/// takes about 3.6 s, which used to trip the 3 s ceiling, and [`Transport`]
+/// then latched a tool that was still busy answering correctly.
+///
+/// The allowance here is four times the measured rate, so a part clocked well
+/// below the default still finishes in time. Callers also split large accesses
+/// up, so this is the second line of defence rather than the first.
+fn data_timeout(len: usize) -> Duration {
+    TIMEOUT + Duration::from_millis(4 * len as u64)
+}
+
 /// Reads that are meant to come back empty use a short timeout.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -439,7 +457,7 @@ impl<'a> Stream<'a> {
             .send(MessageType::Upload, script, params, len)?;
         let response = self.transport.response()?;
 
-        let data = read_packet(&mut self.transport.data_in, len, TIMEOUT);
+        let data = read_packet(&mut self.transport.data_in, len, data_timeout(len));
         let mut data = self.transport.poison(data)?;
         data.truncate(len);
 
@@ -473,7 +491,10 @@ impl<'a> Stream<'a> {
     fn send_data(&mut self, data: &[u8]) -> Result<(), PickitError> {
         self.transport.check_poisoned()?;
 
-        let written = self.transport.data_out.write_bulk(data, TIMEOUT);
+        let written = self
+            .transport
+            .data_out
+            .write_bulk(data, data_timeout(data.len()));
         self.transport.poison(written)?;
 
         self.transport.status_query(ERROR_STATUS_KEY)?;
@@ -574,6 +595,25 @@ mod test {
 
         assert_eq!(response.payload(), b"NONE\0");
         assert!(response.inline_data().is_empty());
+    }
+
+    /// Every figure here was measured on an AVR128DA64. The point of the
+    /// allowance is that a healthy transfer must never trip it, because the
+    /// transport treats a timeout as a hung tool and there is no way back.
+    #[test]
+    fn the_data_timeout_outlasts_a_healthy_transfer() {
+        // 3072 bytes took 2.70 s, and 4096 used to fail against a flat 3 s.
+        assert!(data_timeout(3072) > Duration::from_millis(2_700));
+        assert!(data_timeout(4096) > Duration::from_millis(3_600));
+        // The whole 16 KiB of SRAM took 14.46 s.
+        assert!(data_timeout(16 * 1024) > Duration::from_millis(14_460));
+    }
+
+    /// A flat timeout is what caused the fault, so it has to grow.
+    #[test]
+    fn the_data_timeout_grows_with_the_transfer() {
+        assert!(data_timeout(4096) > data_timeout(512));
+        assert!(data_timeout(0) >= TIMEOUT);
     }
 
     #[test]
