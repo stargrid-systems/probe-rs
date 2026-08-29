@@ -23,6 +23,13 @@ pub struct BinOptions {
 pub struct ElfOptions {
     /// Sections to skip flashing
     pub skip_sections: Vec<String>,
+    /// Sections to skip that the caller did not ask for, because they cannot
+    /// be flashed on this target.
+    ///
+    /// Kept apart from [`ElfOptions::skip_sections`] so that leaving one out
+    /// can be reported. A caller that names a section knows it is going; one
+    /// that does not should be told.
+    pub skip_sections_by_default: Vec<String>,
 }
 
 /// A finite list of all the errors that can occur when flashing a given file.

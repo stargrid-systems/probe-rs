@@ -18,7 +18,7 @@ use probe_rs::flashing::{
     ImageLoader, Uf2Loader,
 };
 use probe_rs::{
-    Session, Target,
+    CoreType, Session, Target,
     flashing::{DownloadOptions, FileDownloadError, FlashLoader},
 };
 use probe_rs_espressif::image_format::IdfLoader;
@@ -160,6 +160,34 @@ pub fn resolve_format_kind(kind: FormatKind, target: &Target) -> FormatKind {
     kind.resolve_default_format(target.default_format.as_deref())
 }
 
+/// Sections an ELF may carry that are not flash on this target.
+///
+/// binutils gives each non-volatile memory of an AVR its own base, putting
+/// `.eeprom` at `0x810000` and the fuses, lock bits and signatures above it.
+/// The target descriptions place those memories at their data-space addresses
+/// instead, so a download that took the section addresses literally fails on an
+/// address that belongs to no region at all.
+///
+/// avrdude and the rest of the AVR tooling ignore these on a flash write and
+/// take a separate operation to program them. probe-rs refuses to program them
+/// at all today, so failing the whole download over data it could never write
+/// would be worse than leaving it out and saying so.
+fn non_flash_sections(target: &Target) -> Vec<String> {
+    let is_avr = target
+        .cores
+        .iter()
+        .any(|core| core.core_type == CoreType::Avr);
+
+    if !is_avr {
+        return Vec::new();
+    }
+
+    [".eeprom", ".fuse", ".lock", ".signature", ".user_signatures"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
+}
+
 fn format_options_image_loader(options: &FormatOptions, target: &Target) -> Box<dyn ImageLoader> {
     match resolve_format_kind(options.binary_format, target) {
         FormatKind::Target => unreachable!(),
@@ -171,6 +199,7 @@ fn format_options_image_loader(options: &FormatOptions, target: &Target) -> Box<
         FormatKind::Hex => Box::new(HexLoader),
         FormatKind::Elf => Box::new(ElfLoader(ElfOptions {
             skip_sections: options.elf_options.skip_section.clone(),
+            skip_sections_by_default: non_flash_sections(target),
         })),
         FormatKind::Uf2 => Box::new(Uf2Loader),
 

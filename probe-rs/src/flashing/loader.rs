@@ -322,6 +322,19 @@ mod builtin {
                             tracing::info!("Skipping section: {:?}", name);
                             continue;
                         }
+                        if options
+                            .skip_sections_by_default
+                            .iter()
+                            .any(|skip| skip == name)
+                        {
+                            // Nobody asked for this one to go, so say that it
+                            // did rather than quietly dropping it.
+                            tracing::warn!(
+                                "Not flashing section {name:?}. It is not in flash on this target, \
+                                 and this target cannot program that memory."
+                            );
+                            continue;
+                        }
                         tracing::info!("Matching section: {:?}", name);
 
                         #[cfg(feature = "hexdump")]
