@@ -573,6 +573,13 @@ impl<'probe> AvrCommunicationInterface<'probe> {
             return Ok(());
         }
 
+        tracing::trace!(
+            script = ?name,
+            address = format_args!("{tool_address:#010x}"),
+            len = data.len(),
+            "reading target memory"
+        );
+
         let params = [tool_address, data.len() as u32];
         let read = self
             .probe
@@ -589,6 +596,13 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         if data.is_empty() {
             return Ok(());
         }
+
+        tracing::trace!(
+            script = ?name,
+            address = format_args!("{tool_address:#010x}"),
+            len = data.len(),
+            "writing target memory"
+        );
 
         let params = [tool_address, data.len() as u32];
 
