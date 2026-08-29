@@ -416,7 +416,13 @@ impl<'probe> Core<'probe> {
                 None => breakpoints
                     .iter()
                     .position(|bp| bp.is_none())
-                    .ok_or_else(|| Error::Other("No available hardware breakpoints".to_string()))?,
+                    .ok_or_else(|| {
+                        Error::Other(format!(
+                            "No available hardware breakpoints. This core has {}, and all of \
+                             them are in use.",
+                            breakpoints.len()
+                        ))
+                    })?,
             };
 
         tracing::debug!(
