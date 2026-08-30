@@ -503,6 +503,39 @@ impl<'probe> Avr<'probe> {
         )))
     }
 
+    /// The hardware units a debug reset disarmed, with their addresses.
+    ///
+    /// A debug reset clears both address registers, the per-unit enables, and
+    /// the global enable in `TRAPEN`, so every armed unit has to be written
+    /// back afterwards. Software breakpoints survive a reset: `SWBP` stays set
+    /// and the planted `BREAK` stays in flash, so their slots are not listed.
+    fn units_to_rearm(state: &AvrCoreState) -> Vec<(usize, u64)> {
+        state
+            .hw_breakpoints
+            .iter()
+            .enumerate()
+            .filter_map(|(unit, address)| address.map(|address| (unit, address)))
+            .collect()
+    }
+
+    /// Writes back the hardware breakpoints a debug reset cleared.
+    fn rearm_hw_breakpoints(&mut self) -> Result<(), Error> {
+        let units = Self::units_to_rearm(&*self.state);
+        let had_units = !units.is_empty();
+
+        for (unit, address) in units {
+            let word_address = Self::byte_to_word_address(address);
+            self.interface.set_hw_breakpoint(unit, word_address)?;
+        }
+
+        // The reset cleared the global enable along with the units.
+        if self.state.breakpoints_enabled && had_units {
+            self.update_trapen(ocd::trapen::HWBP, 0)?;
+        }
+
+        Ok(())
+    }
+
     /// Checks that `address` can be the start of an instruction.
     ///
     /// AVR instructions are word aligned, so an odd address falls inside one
@@ -657,6 +690,7 @@ impl CoreInterface for Avr<'_> {
         // so reset and halt need no separate steps.
         self.interface.debug_reset()?;
         self.wait_for_core_halted(timeout)?;
+        self.rearm_hw_breakpoints()?;
 
         self.core_info()
     }
@@ -1039,7 +1073,6 @@ mod tests {
         let mut state = AvrCoreState::new();
 
         assert!(state.software_breakpoint_at(0x356).is_none());
-
         state.sw_breakpoints[3] = Some(SoftwareBreakpoint {
             address: 0x356,
             original: 0x1234,
@@ -1051,6 +1084,30 @@ mod tests {
         assert_eq!(found.original, 0x1234);
         // A different address stays free, so it would still be planted.
         assert!(state.software_breakpoint_at(0x358).is_none());
+    }
+
+    #[test]
+    fn a_debug_reset_rearms_only_armed_hardware_units() {
+        let mut state = AvrCoreState::new();
+        state.hw_breakpoints[0] = Some(0x100);
+        state.hw_breakpoints[1] = Some(0x2fc);
+        state.sw_breakpoints[0] = Some(SoftwareBreakpoint {
+            address: 0x356,
+            original: 0x818a,
+        });
+
+        assert_eq!(Avr::units_to_rearm(&state), vec![(0, 0x100), (1, 0x2fc)]);
+    }
+
+    #[test]
+    fn nothing_is_rearmed_when_no_hardware_unit_is_armed() {
+        let mut state = AvrCoreState::new();
+        state.sw_breakpoints[2] = Some(SoftwareBreakpoint {
+            address: 0x356,
+            original: 0x818a,
+        });
+
+        assert!(Avr::units_to_rearm(&state).is_empty());
     }
 
     /// The backstop in `write_flash_word` refuses a word that would run past
