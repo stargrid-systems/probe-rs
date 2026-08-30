@@ -28,14 +28,14 @@ use probe_rs_target::{Architecture, CoreType, InstructionSet};
 
 use crate::core::registers::{CoreRegisters, RegisterId, RegisterValue};
 use crate::error::Error;
-use crate::memory::CoreMemoryInterface;
 use crate::{
     BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus, HaltReason,
     MemoryInterface,
 };
 
 use self::communication_interface::{
-    AvrCommunicationInterface, DATA_SPACE_OFFSET, HW_BREAKPOINT_UNITS, to_chip_data_address,
+    AddressSpace, AvrCommunicationInterface, DATA_SPACE_OFFSET, HW_BREAKPOINT_UNITS,
+    to_chip_data_address,
 };
 use self::ocd::OcdVersion;
 use self::registers::{AVR_CORE_REGISTERS, FP, PC, SP, SREG};
@@ -140,6 +140,22 @@ impl AvrCoreState {
             .find(|breakpoint| breakpoint.address == address)
             .copied()
     }
+
+    /// Takes every planted software breakpoint out of the state.
+    ///
+    /// The caller restores the instructions itself, from outside the core,
+    /// while the image the breakpoints were planted in is still in flash.
+    /// Taking the records out leaves no breakpoint behind, so a later removal
+    /// cannot write any of them back over a new image.
+    pub(crate) fn take_software_breakpoints(&mut self) -> Vec<(u64, u16)> {
+        self.sw_breakpoints
+            .iter_mut()
+            .filter_map(|slot| {
+                slot.take()
+                    .map(|breakpoint| (breakpoint.address, breakpoint.original))
+            })
+            .collect()
+    }
 }
 
 /// An interface to operate an AVR core.
@@ -201,41 +217,6 @@ impl<'probe> Avr<'probe> {
             .write_8(ocd::address(offset), &value.to_le_bytes())
     }
 
-    /// Reads the instruction word at a byte address in flash.
-    fn read_flash_word(&mut self, address: u64) -> Result<u16, Error> {
-        let mut word = [0u8; 2];
-        self.interface.read_flash(address, &mut word)?;
-
-        Ok(u16::from_le_bytes(word))
-    }
-
-    /// Writes one instruction word, keeping the rest of its page.
-    ///
-    /// `WriteProgmem` erases and programs a whole page, so a single word costs
-    /// a read of the page, a patch, and a write back. This is the expensive
-    /// half of a software breakpoint and the reason there are only
-    /// [`SW_BREAKPOINT_SLOTS`] of them.
-    fn write_flash_word(&mut self, address: u64, word: u16) -> Result<(), Error> {
-        let page_size = self.interface.family().flash_page_size();
-        let (page, offset) = page_span(address, page_size);
-
-        // A backstop, not the real check. [`Avr::check_breakpoint_address`]
-        // keeps odd addresses out, and only those can push a word past the
-        // end of the page, where this would panic half way through a write.
-        if offset + 2 > page_size as usize {
-            return Err(Error::Other(format!(
-                "The instruction word at {address:#x} straddles the end of its flash page."
-            )));
-        }
-
-        let mut buffer = vec![0u8; page_size as usize];
-        self.interface.read_flash(page, &mut buffer)?;
-        buffer[offset..offset + 2].copy_from_slice(&word.to_le_bytes());
-        self.interface.write_flash(page, &buffer)?;
-
-        Ok(())
-    }
-
     /// Gets past a `BREAK` at the program counter without touching flash.
     ///
     /// The instruction the `BREAK` replaced is injected instead, so the core
@@ -276,7 +257,7 @@ impl<'probe> Avr<'probe> {
             return Ok(());
         }
 
-        let original = self.read_flash_word(address)?;
+        let original = self.interface.read_flash_word(address)?;
 
         if original == ocd::BREAK_INSTRUCTION {
             return Err(Error::Other(format!(
@@ -292,20 +273,80 @@ impl<'probe> Avr<'probe> {
              AVR parts are rated for as few as 1000 erase cycles."
         );
 
-        self.write_flash_word(address, ocd::BREAK_INSTRUCTION)?;
+        self.interface
+            .write_flash_word(address, ocd::BREAK_INSTRUCTION)?;
         self.state.sw_breakpoints[slot] = Some(SoftwareBreakpoint { address, original });
 
         Ok(())
     }
 
     /// Puts back the instruction a software breakpoint replaced.
+    ///
+    /// Flash is read back first. The breakpoint may have been overwritten by
+    /// something outside this machinery, and then the instruction it remembers
+    /// describes an image that is no longer there. Writing it back would leave
+    /// two wrong bytes in whatever is in flash now, so the record is dropped
+    /// with a warning instead. See [`Avr::restored_word`].
     fn remove_software_breakpoint(&mut self, slot: usize) -> Result<(), Error> {
         let Some(breakpoint) = self.state.sw_breakpoints[slot] else {
             return Ok(());
         };
 
-        self.write_flash_word(breakpoint.address, breakpoint.original)?;
+        let address = breakpoint.address;
+        let current = self.interface.read_flash_word(address)?;
+
+        match Avr::restored_word(current, breakpoint.original) {
+            Some(word) => self.interface.write_flash_word(address, word)?,
+            None => tracing::warn!(
+                "The word at {address:#x} is not the BREAK this session planted there, \
+                 so flash was rewritten under the breakpoint. Dropping it without \
+                 writing back the instruction it remembered, which belongs to the \
+                 old image."
+            ),
+        }
+
         self.state.sw_breakpoints[slot] = None;
+
+        Ok(())
+    }
+
+    /// Decides what removing a software breakpoint does to flash.
+    ///
+    /// `current` is the word read back from the breakpoint address. Only the
+    /// planted `BREAK` says the breakpoint is still in flash and that
+    /// `original` still describes the image, so that is the only case where
+    /// the instruction goes back. Anything else, including a word that happens
+    /// to equal `original`, means flash changed underneath the breakpoint and
+    /// restoring would put old-image bytes into a new one. `None` says to drop
+    /// the record without writing.
+    pub(crate) fn restored_word(current: u16, original: u16) -> Option<u16> {
+        (current == ocd::BREAK_INSTRUCTION).then_some(original)
+    }
+
+    /// Removes every software breakpoint this session planted.
+    ///
+    /// A flash rewrite from outside the breakpoint machinery would erase the
+    /// planted BREAKs along with the rest of their pages, and the records
+    /// would end up describing an image that is gone. Taking them out first
+    /// puts the instructions back while they are still the right ones.
+    fn remove_all_software_breakpoints(&mut self) -> Result<(), Error> {
+        for slot in 0..SW_BREAKPOINT_SLOTS {
+            self.remove_software_breakpoint(slot)?;
+        }
+
+        Ok(())
+    }
+
+    /// Takes the software breakpoints out when a write is headed for flash.
+    ///
+    /// Only writes routed to flash need this. The data space is a separate
+    /// memory, and the breakpoint machinery writes its own words straight
+    /// through the interface, so those never run through here and never take
+    /// themselves out.
+    fn clear_breakpoints_before_flash_write(&mut self, address: u64) -> Result<(), Error> {
+        if AddressSpace::of(address) == AddressSpace::Flash {
+            self.remove_all_software_breakpoints()?;
+        }
 
         Ok(())
     }
@@ -479,15 +520,75 @@ impl<'probe> Avr<'probe> {
     }
 }
 
-impl CoreMemoryInterface for Avr<'_> {
-    type ErrorType = Error;
-
-    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
-        &self.interface
+/// The memory access the core hands out, with the flash guard on writes.
+///
+/// A data write that lands on flash goes through the same scripts the
+/// breakpoint machinery uses, but it erases whole pages and takes every
+/// planted software breakpoint in them with it. The guard removes the
+/// breakpoints first, while the instructions they replaced are still the
+/// right ones to put back. Reads have no such side effect and pass straight
+/// through.
+impl MemoryInterface<Error> for Avr<'_> {
+    fn supports_native_64bit_access(&mut self) -> bool {
+        self.interface.supports_native_64bit_access()
     }
 
-    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
-        &mut self.interface
+    fn supports_8bit_transfers(&self) -> Result<bool, Error> {
+        self.interface.supports_8bit_transfers()
+    }
+
+    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
+        self.interface.read_8(address, data)
+    }
+
+    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
+        self.interface.read_16(address, data)
+    }
+
+    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
+        self.interface.read_32(address, data)
+    }
+
+    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
+        self.interface.read_64(address, data)
+    }
+
+    /// Reads without widening the access. The data space starts with the IO
+    /// registers, where reading a byte nobody asked for can have a side
+    /// effect.
+    fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
+        self.interface.read(address, data)
+    }
+
+    fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
+        self.clear_breakpoints_before_flash_write(address)?;
+        self.interface.write_8(address, data)
+    }
+
+    fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), Error> {
+        self.clear_breakpoints_before_flash_write(address)?;
+        self.interface.write_16(address, data)
+    }
+
+    fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
+        self.clear_breakpoints_before_flash_write(address)?;
+        self.interface.write_32(address, data)
+    }
+
+    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), Error> {
+        self.clear_breakpoints_before_flash_write(address)?;
+        self.interface.write_64(address, data)
+    }
+
+    /// Writes without widening the access.
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
+        self.clear_breakpoints_before_flash_write(address)?;
+        self.interface.write(address, data)
+    }
+
+    /// Nothing is buffered, so there is nothing to flush.
+    fn flush(&mut self) -> Result<(), Error> {
+        self.interface.flush()
     }
 }
 
@@ -963,5 +1064,63 @@ mod tests {
 
             assert!(offset + 2 > page_size as usize, "{page_size}");
         }
+    }
+
+    /// A removal writes the instruction back only when the planted BREAK is
+    /// still in flash. Anything else at the address belongs to a newer image,
+    /// and the remembered instruction describes the old one, so restoring
+    /// would corrupt two bytes of it.
+    #[test]
+    fn a_breakpoint_word_is_restored_only_when_the_break_is_still_there() {
+        // The planted BREAK is intact, so the instruction goes back.
+        assert_eq!(
+            Avr::restored_word(ocd::BREAK_INSTRUCTION, 0x950f),
+            Some(0x950f)
+        );
+        // Erased flash and new code are both not ours.
+        assert_eq!(Avr::restored_word(0xFFFF, 0x950f), None);
+        assert_eq!(Avr::restored_word(0x0000, 0x950f), None);
+        // A word that happens to equal the remembered instruction is still not
+        // a planted BREAK, and writing it would cost an erase cycle for nothing.
+        assert_eq!(Avr::restored_word(0x950f, 0x950f), None);
+    }
+
+    /// Two breakpoints can share one page. A removal patches only the word it
+    /// is given, so taking one of them out leaves the other's BREAK in place.
+    /// Both words sit at different offsets of the same page and neither write
+    /// covers the other.
+    #[test]
+    fn two_breakpoints_in_one_page_patch_different_words() {
+        let page_size = 512;
+        let (first_page, first_offset) = page_span(0x200, page_size);
+        let (second_page, second_offset) = page_span(0x356, page_size);
+
+        assert_eq!(first_page, second_page);
+        assert!(first_offset + 2 <= second_offset);
+    }
+
+    /// Taking the breakpoints out of the state leaves no record behind, so a
+    /// later removal cannot write any of them back over a new image.
+    #[test]
+    fn taking_the_breakpoints_out_leaves_no_record_behind() {
+        let mut state = AvrCoreState::new();
+
+        state.sw_breakpoints[1] = Some(SoftwareBreakpoint {
+            address: 0x356,
+            original: 0x1234,
+        });
+        state.sw_breakpoints[3] = Some(SoftwareBreakpoint {
+            address: 0x400,
+            original: 0x5678,
+        });
+
+        assert_eq!(
+            state.take_software_breakpoints(),
+            vec![(0x356, 0x1234), (0x400, 0x5678)]
+        );
+        assert!(state.software_breakpoint_at(0x356).is_none());
+        assert!(state.software_breakpoint_at(0x400).is_none());
+        // Taking them again finds nothing.
+        assert!(state.take_software_breakpoints().is_empty());
     }
 }

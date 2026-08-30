@@ -278,6 +278,9 @@ pub enum AvrError {
         /// The length of the access in bytes.
         length: usize,
     },
+
+    /// The instruction word at {0:#x} does not fit in its flash page.
+    WordPastPageEnd(u64),
 }
 
 impl From<AvrError> for crate::Error {
@@ -557,7 +560,7 @@ impl<'probe> AvrCommunicationInterface<'probe> {
 
     /// Writes the data space one byte at a time.
     ///
-    /// Split into [`MAX_TRANSFER`] blocks. The whole transfer has to fit in the
+    /// Split into `MAX_TRANSFER` blocks. The whole transfer has to fit in the
     /// data space. Flash is deliberately not split this way, because a flash
     /// write erases whole pages and the caller aligns it.
     pub fn write_data_8(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
@@ -640,6 +643,40 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         let tool_address = to_tool_flash_address(self.state.family, address)?;
 
         self.write(ScriptName::WriteProgmem, tool_address, data)
+    }
+
+    /// Reads the instruction word at a byte address in flash.
+    pub(crate) fn read_flash_word(&mut self, address: u64) -> Result<u16, AvrError> {
+        let mut word = [0u8; 2];
+        self.read_flash(address, &mut word)?;
+
+        Ok(u16::from_le_bytes(word))
+    }
+
+    /// Writes one instruction word, keeping the rest of its page.
+    ///
+    /// `WriteProgmem` erases and programs a whole page, so a single word costs
+    /// a read of the page, a patch, and a write back. This is the expensive
+    /// half of a software breakpoint and the reason there are only a few
+    /// software slots. The patch touches only the word it is given, so a page
+    /// can hold several breakpoints and lose one without losing the others.
+    pub(crate) fn write_flash_word(&mut self, address: u64, word: u16) -> Result<(), AvrError> {
+        let page_size = self.family().flash_page_size();
+        let (page, offset) = super::page_span(address, page_size);
+
+        // A backstop, not the real check. `check_breakpoint_address` keeps odd
+        // addresses out, and only those can push a word past the end of the
+        // page, where this would panic half way through a write.
+        if offset + 2 > page_size as usize {
+            return Err(AvrError::WordPastPageEnd(address));
+        }
+
+        let mut buffer = vec![0u8; page_size as usize];
+        self.read_flash(page, &mut buffer)?;
+        buffer[offset..offset + 2].copy_from_slice(&word.to_le_bytes());
+        self.write_flash(page, &buffer)?;
+
+        Ok(())
     }
 
     /// Erases flash, EEPROM, and the lock bits.

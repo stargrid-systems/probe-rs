@@ -9,8 +9,11 @@ use crate::{
             memory::CoresightComponent,
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
-        avr::communication_interface::{
-            AvrCommunicationInterface, AvrDebugInterfaceState, AvrError, flash_range,
+        avr::{
+            Avr,
+            communication_interface::{
+                AvrCommunicationInterface, AvrDebugInterfaceState, AvrError, flash_range,
+            },
         },
         riscv::{
             communication_interface::{
@@ -23,7 +26,7 @@ use crate::{
         },
     },
     config::{CoreExt, DebugSequence, RegistryError, Target, TargetSelector, registry::Registry},
-    core::{Architecture, CombinedCoreState},
+    core::{Architecture, CombinedCoreState, SpecificCoreState},
     probe::{
         AttachMethod, DebugProbeError, Probe, ProbeCreationError, WireProtocol,
         fake_probe::FakeProbe, list::Lister, pickit::AvrFamily,
@@ -857,6 +860,60 @@ impl Session {
         Ok(probe.try_get_avr_interface(state)?)
     }
 
+    /// Removes the software breakpoints an AVR core of this session planted,
+    /// and puts the instructions they replaced back.
+    ///
+    /// Flash is about to be rewritten through a path that bypasses the
+    /// breakpoint machinery. Both the NVM driver and a plain memory write
+    /// erase whole pages, which takes the planted BREAKs with it. Removing
+    /// them first restores what the old image had, so no stale word is left
+    /// to be written back over the new one later.
+    ///
+    /// This deliberately does not go through [`Session::core`]. Taking a core
+    /// handle runs the attach flow, which for AVR enters debug mode: the
+    /// `ArchitectureInterface::Avr` arm of `Session::core` ends in
+    /// [`Avr::new`], which sends the on-chip debug key and debug-resets the
+    /// part. A session sitting in programming mode has to stay there for
+    /// flashing to work. Every core state is created when the session opens,
+    /// so this walks the existing states directly. A core that was never
+    /// attached has no planted breakpoints, and a session with none of those
+    /// takes no hardware access at all.
+    pub(crate) fn clear_avr_software_breakpoints(&mut self) -> Result<(), Error> {
+        let breakpoints = self
+            .cores
+            .iter_mut()
+            .filter_map(|core| match &mut core.specific_state {
+                SpecificCoreState::Avr(state) => Some(state.take_software_breakpoints()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+
+        // Nothing planted, so nothing to restore and no reason to reach the probe.
+        if breakpoints.is_empty() {
+            return Ok(());
+        }
+
+        let mut interface = self.get_avr_interface()?;
+
+        for (address, original) in breakpoints {
+            // The same guard removing a breakpoint on the core applies: a word
+            // that is not the planted BREAK means flash changed underneath the
+            // breakpoint, and the remembered instruction is stale.
+            let current = interface.read_flash_word(address)?;
+
+            match Avr::restored_word(current, original) {
+                Some(word) => interface.write_flash_word(address, word)?,
+                None => tracing::warn!(
+                    "The word at {address:#x} is not the software breakpoint this \
+                     session planted, so its instruction is not written back."
+                ),
+            }
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all)]
     fn reattach_arm_interface(
         interface: &mut Box<dyn ArmDebugInterface>,
@@ -1244,3 +1301,93 @@ impl Permissions {
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("An operation could not be performed because it lacked the permission to do so: {0}")]
 pub struct MissingPermissions(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::architecture::avr::sequences::DefaultAvrSequence;
+    use probe_rs_target::{
+        ApAddress, ArmCoreAccessOptions, AvrCoreAccessOptions, CoreAccessOptions,
+        TargetDescriptionSource,
+    };
+    use std::ops::Range;
+
+    /// A minimal AVR target. The sessions below never attach, so nothing
+    /// beyond the core types is read from it.
+    fn test_target() -> Target {
+        Target {
+            name: "AVR128DA64".to_string(),
+            cores: vec![probe_rs_target::Core {
+                name: "main".to_string(),
+                core_type: CoreType::Avr,
+                core_access_options: CoreAccessOptions::Avr(AvrCoreAccessOptions {}),
+            }],
+            flash_algorithms: vec![],
+            memory_map: vec![],
+            source: TargetDescriptionSource::Generic,
+            debug_sequence: DebugSequence::Avr(DefaultAvrSequence::create()),
+            rtt_scan_regions: crate::rtt::ScanRegion::Ranges(Vec::<Range<u64>>::new()),
+            jtag: None,
+            default_format: None,
+            skip_reset_on_ram_boot: false,
+        }
+    }
+
+    fn avr_core_state(id: usize) -> CombinedCoreState {
+        Core::create_state(
+            id,
+            CoreAccessOptions::Avr(AvrCoreAccessOptions {}),
+            &test_target(),
+            CoreType::Avr,
+        )
+    }
+
+    fn arm_core_state(id: usize) -> CombinedCoreState {
+        Core::create_state(
+            id,
+            CoreAccessOptions::Arm(ArmCoreAccessOptions {
+                ap: ApAddress::V1(0),
+                targetsel: None,
+                debug_base: None,
+                cti_base: None,
+                jtag_tap: None,
+            }),
+            &test_target(),
+            CoreType::Armv6m,
+        )
+    }
+
+    /// A session over a fake probe. The fake has no AVR interface, so if the
+    /// code under test reached for it the call would fail, which is what makes
+    /// the no-op cases below meaningful.
+    fn avr_test_session(cores: Vec<CombinedCoreState>) -> Session {
+        Session {
+            target: test_target(),
+            interfaces: ArchitectureInterface::Avr(
+                Probe::new(FakeProbe::new()),
+                AvrDebugInterfaceState::new(AvrFamily::Dx),
+            ),
+            cores,
+            configured_trace_sink: None,
+        }
+    }
+
+    /// A session whose AVR core was never attached has no planted breakpoints,
+    /// so clearing them is a no-op that must not reach the probe at all.
+    #[test]
+    fn clearing_software_breakpoints_without_any_planted_is_a_no_op() {
+        let mut session = avr_test_session(vec![avr_core_state(0)]);
+
+        session.clear_avr_software_breakpoints().unwrap();
+    }
+
+    /// The walk looks at the core states and skips the ones that are not AVR,
+    /// so a session that also holds other cores neither panics nor touches
+    /// them.
+    #[test]
+    fn clearing_software_breakpoints_skips_cores_that_are_not_avr() {
+        let mut session = avr_test_session(vec![arm_core_state(0), avr_core_state(1)]);
+
+        session.clear_avr_software_breakpoints().unwrap();
+    }
+}

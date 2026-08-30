@@ -190,6 +190,13 @@ impl AvrNvmDriver {
     }
 
     fn chip_erase(&mut self, session: &mut Session) -> Result<(), FlashError> {
+        // The erase wipes the planted software breakpoints along with the rest
+        // of flash. Take them out first, while the old image can still be
+        // restored from.
+        session
+            .clear_avr_software_breakpoints()
+            .map_err(FlashError::Core)?;
+
         let mut interface = session.get_avr_interface().map_err(FlashError::Core)?;
 
         interface
@@ -214,8 +221,19 @@ impl AvrNvmDriver {
             }
         }
 
+        {
+            let mut interface = session.get_avr_interface().map_err(FlashError::Core)?;
+            halt_if_debugging(&mut interface)?;
+        }
+
+        // Each page write below erases its whole page, which takes the planted
+        // software breakpoints in it with it. Remove them first, while the old
+        // image is still in flash and the instructions they replaced can still
+        // be restored.
+        session
+            .clear_avr_software_breakpoints()
+            .map_err(FlashError::Core)?;
         let mut interface = session.get_avr_interface().map_err(FlashError::Core)?;
-        halt_if_debugging(&mut interface)?;
 
         let encoding = self.transfer_encoding();
 
@@ -323,6 +341,14 @@ impl NvmDriver for AvrNvmDriver {
         session: &mut Session,
         f: &mut dyn FnMut(&mut dyn NvmReader) -> Result<(), FlashError>,
     ) -> Result<(), FlashError> {
+        // With `keep_unwritten_bytes`, what is read here becomes part of the
+        // new image. The planted software breakpoints have to come out first,
+        // or the read picks up their BREAK instructions and programs them
+        // back into the new firmware.
+        session
+            .clear_avr_software_breakpoints()
+            .map_err(FlashError::Core)?;
+
         let mut interface = session.get_avr_interface().map_err(FlashError::Core)?;
 
         f(&mut AvrReader(&mut interface))
