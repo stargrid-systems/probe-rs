@@ -51,7 +51,7 @@ use crate::architecture::avr::communication_interface::{
     AvrCommunicationInterface, AvrError, DATA_SPACE_OFFSET,
 };
 use crate::flashing::nvm_driver::{LoadedRegion, NvmDriver, NvmGeometry, NvmReader};
-use crate::flashing::{FlashError, FlashProgress};
+use crate::flashing::{FlashError, FlashProgress, FlashSector};
 use crate::probe::pickit::{AvrFamily, SessionState};
 use crate::session::Session;
 
@@ -257,6 +257,41 @@ impl AvrNvmDriver {
 
         Ok(())
     }
+
+    fn erase_sector_pages(
+        &mut self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+        sectors: &[FlashSector],
+    ) -> Result<(), FlashError> {
+        {
+            let mut interface = session.get_avr_interface().map_err(FlashError::Core)?;
+            halt_if_debugging(&mut interface)?;
+        }
+
+        // The page writes below take the planted software breakpoints with
+        // them, so remove those first, while the old image is still in flash.
+        session
+            .clear_avr_software_breakpoints()
+            .map_err(FlashError::Core)?;
+        let mut interface = session.get_avr_interface().map_err(FlashError::Core)?;
+
+        for sector in sectors {
+            let start = Instant::now();
+            let page = vec![0xff; sector.size() as usize];
+
+            interface
+                .write_flash(sector.address(), &page)
+                .map_err(|err| FlashError::PageWrite {
+                    page_address: sector.address(),
+                    source: Box::new(err),
+                })?;
+
+            progress.sector_erased(sector.size(), start.elapsed());
+        }
+
+        Ok(())
+    }
 }
 
 impl NvmDriver for AvrNvmDriver {
@@ -317,6 +352,29 @@ impl NvmDriver for AvrNvmDriver {
         Ok(())
     }
 
+    /// Erases selected sectors by writing each one full of erased bytes.
+    ///
+    /// A page write erases the page it writes, so a whole page of `0xff` is an
+    /// erase. The erase.rs restore flow relies on this shape: bytes outside the
+    /// erased range are read beforehand and written back afterwards with plain
+    /// page writes, which erase and reprogram their own pages.
+    fn erase_selected_sectors(
+        &mut self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+        sectors: &[FlashSector],
+    ) -> Result<(), FlashError> {
+        progress.started_erasing();
+
+        let result = self.erase_sector_pages(session, progress, sectors);
+
+        match result.is_ok() {
+            true => progress.finished_erasing(),
+            false => progress.failed_erasing(),
+        }
+
+        result
+    }
     fn program_pages(
         &mut self,
         session: &mut Session,
@@ -392,7 +450,7 @@ mod tests {
     use probe_rs_target::MemoryAccess;
 
     use super::*;
-    use crate::flashing::builder::FlashBuilder;
+    use crate::flashing::builder::{FlashBuilder, FlashSector};
 
     /// Flash of an AVR128DA64, which is the part the write path was measured on.
     fn dx_geometry() -> AvrFlashGeometry {
@@ -632,5 +690,29 @@ mod tests {
             .map(|fill| (fill.address(), fill.size()))
             .collect();
         assert_eq!(fills, [(0, 0x100), (0x103, 0xfd)]);
+    }
+    /// The geometry emits one sector per flash page, so erasing a list of
+    /// sectors writes exactly one full page each, in order.
+    #[test]
+    fn selected_sectors_are_whole_pages() {
+        for (geometry, count) in [(dx_geometry(), 4), (tiny_geometry(), 8)] {
+            let sectors: Vec<FlashSector> = geometry
+                .sectors()
+                .take(count)
+                .map(|info| FlashSector {
+                    address: info.base_address,
+                    size: info.size,
+                })
+                .collect();
+
+            assert_eq!(sectors.len(), count);
+            for (index, sector) in sectors.iter().enumerate() {
+                assert_eq!(
+                    sector.address(),
+                    (index as u64) * u64::from(geometry.page_size)
+                );
+                assert_eq!(sector.size(), u64::from(geometry.page_size));
+            }
+        }
     }
 }
