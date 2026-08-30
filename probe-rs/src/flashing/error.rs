@@ -73,6 +73,18 @@ pub enum FlashError {
         /// The region that cannot be programmed.
         range: Range<u64>,
     },
+    /// No AVR flash region is declared below the data space offset.
+    ///
+    /// probe-rs places flash below the data space offset and the data space above it.
+    /// An AVR target description without such a region cannot be programmed, and no
+    /// flash algorithm can help, because AVR parts have none.
+    #[error(
+        "The target description for {name} declares no AVR flash region below the data space offset."
+    )]
+    MissingAvrFlashRegion {
+        /// The name of the chip.
+        name: String,
+    },
     /// Initializing the flash algorithm failed.
     #[error("The initialization of the flash algorithm failed.")]
     Init(#[source] Box<dyn std::error::Error + 'static + Send + Sync>),

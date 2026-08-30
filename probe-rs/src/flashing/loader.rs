@@ -963,7 +963,7 @@ impl FlashLoader {
             // A target whose probe or debug sequence programs flash directly supplies
             // its own driver. Only a target without one needs a flash algorithm, so only
             // then is a missing algorithm an error.
-            let driver = match nvm_driver::driver_for_region(session, &region, core) {
+            let driver = match nvm_driver::driver_for_region(session, &region, core)? {
                 Some(driver) => driver,
                 None => {
                     let target = session.target();

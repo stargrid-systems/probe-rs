@@ -166,6 +166,16 @@ pub trait NvmDriver {
         false
     }
 
+    /// Whether the driver can program `region`.
+    ///
+    /// A driver can own regions it has no way to write: one driver can cover every
+    /// non-volatile region of a part while only some of them are writable through
+    /// it. The loader refuses data for a region this returns `false` for, before
+    /// it plans pages or touches the target.
+    fn programs(&self, _region: &NvmRegion) -> bool {
+        true
+    }
+
     /// Whether [`erase_all`](Self::erase_all) can erase the whole device.
     fn is_chip_erase_supported(&self, session: &Session) -> bool;
 
@@ -295,16 +305,20 @@ pub trait NvmDriver {
 /// The architecture decides. AVR is programmed by the probe, so it gets a driver.
 /// Every other architecture returns `None` and takes the flash algorithm path.
 ///
+/// An AVR whose target description cannot support the driver is an error rather than
+/// a `None`, because falling back to the flash algorithm path would report a missing
+/// algorithm when the real problem is the target description.
+///
 /// The region is not used for AVR. One driver covers every non-volatile region of
 /// the part, so the regions share a plan and a chip erase runs once for all of them.
 pub(super) fn driver_for_region(
     session: &mut Session,
     _region: &NvmRegion,
     _core_index: usize,
-) -> Option<Box<dyn NvmDriver>> {
+) -> Result<Option<Box<dyn NvmDriver>>, FlashError> {
     match session.architecture() {
-        Architecture::Avr => avr::driver_for(session),
-        _ => None,
+        Architecture::Avr => Ok(Some(avr::driver_for(session)?)),
+        _ => Ok(None),
     }
 }
 
@@ -522,7 +536,11 @@ mod tests {
             .expect("nrf51822 has flash")
             .clone();
 
-        assert!(driver_for_region(&mut session, &region, 0).is_none());
+        assert!(
+            driver_for_region(&mut session, &region, 0)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

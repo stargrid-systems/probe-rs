@@ -65,33 +65,36 @@ const DRIVER_NAME: &str = "AVR UPDI";
 /// Erased AVR flash reads back as all ones.
 const ERASED_BYTE_VALUE: u8 = 0xff;
 
-/// Builds the AVR driver for `session`, or `None` if this is not an AVR.
+/// Builds the AVR driver for `session`.
 ///
-/// The caller checks the architecture, so `None` here means an AVR whose family
-/// or flash region could not be worked out. That is a broken target
-/// description, and it is logged rather than silently ignored.
-pub(super) fn driver_for(session: &Session) -> Option<Box<dyn NvmDriver>> {
-    let target = session.target();
-    let geometry = geometry_for(&target.name, &target.memory_map)?;
+/// The caller checks the architecture, so the session is an AVR here. The family
+/// comes from the interface state the session built at attach time, so the driver
+/// and the rest of the session cannot disagree about it.
+pub(super) fn driver_for(session: &mut Session) -> Result<Box<dyn NvmDriver>, FlashError> {
+    let family = session
+        .get_avr_interface()
+        .map_err(FlashError::Core)?
+        .family();
 
-    Some(Box::new(AvrNvmDriver { geometry }))
+    let target = session.target();
+    let geometry = geometry_for(&target.name, family, &target.memory_map)?;
+
+    Ok(Box::new(AvrNvmDriver { geometry }))
 }
 
-/// Works out the flash layout of the part called `name`.
-fn geometry_for(name: &str, memory_map: &[MemoryRegion]) -> Option<AvrFlashGeometry> {
-    // The same derivation `Session::attach_avr` uses, so the two agree by
-    // construction. The target description has no field for the family.
-    let Some(family) = AvrFamily::for_device(name) else {
-        tracing::warn!("{name} is not a known AVR family, so it has no NVM driver");
-        return None;
-    };
-
+/// Works out the flash layout of the part called `name` in `family`.
+fn geometry_for(
+    name: &str,
+    family: AvrFamily,
+    memory_map: &[MemoryRegion],
+) -> Result<AvrFlashGeometry, FlashError> {
     let Some(range) = flash_range(memory_map) else {
-        tracing::warn!("{name} declares no AVR flash region, so it has no NVM driver");
-        return None;
+        return Err(FlashError::MissingAvrFlashRegion {
+            name: name.to_string(),
+        });
     };
 
-    Some(AvrFlashGeometry {
+    Ok(AvrFlashGeometry {
         range,
         page_size: family.flash_page_size(),
     })
@@ -180,15 +183,6 @@ struct AvrNvmDriver {
 }
 
 impl AvrNvmDriver {
-    /// Whether this driver can program `region`.
-    ///
-    /// Only flash. EEPROM, the fuses, and the lock bits have their own scripts
-    /// that nothing has exercised yet, so they are refused rather than written
-    /// with the wrong one.
-    fn programs(&self, region: &NvmRegion) -> bool {
-        self.geometry.range.contains_range(&region.range)
-    }
-
     fn chip_erase(&mut self, session: &mut Session) -> Result<(), FlashError> {
         // The erase wipes the planted software breakpoints along with the rest
         // of flash. Take them out first, while the old image can still be
@@ -313,6 +307,16 @@ impl NvmDriver for AvrNvmDriver {
     /// tool to finish it.
     fn supports_double_buffering(&self) -> bool {
         false
+    }
+
+    /// Only flash. EEPROM, the fuses, and the lock bits have their own scripts
+    /// that nothing has exercised yet, so they are refused rather than written
+    /// with the wrong one.
+    ///
+    /// The loader consults this when a region joins a plan, so data for the
+    /// configuration memories fails before any phase touches the target.
+    fn programs(&self, region: &NvmRegion) -> bool {
+        self.geometry.range.contains_range(&region.range)
     }
 
     fn is_chip_erase_supported(&self, _session: &Session) -> bool {
@@ -585,8 +589,8 @@ mod tests {
         assert_eq!(flash_range(&memory_map), Some(0..0x2_0000));
     }
 
-    /// The two families differ in page size, and the name is what picks between
-    /// them, so walk both from the name and the memory map the target ships.
+    /// The two families differ in page size, and the family is what picks between
+    /// them, so walk both families with the memory maps the targets ship.
     #[test]
     fn each_family_gets_the_page_size_of_its_parts() {
         let dx = [
@@ -598,20 +602,27 @@ mod tests {
             nvm_region("MAPPED_PROGMEM", 0x80_8000..0x80_9000, true),
         ];
 
-        let geometry = geometry_for("AVR128DA64", &dx).unwrap();
+        let geometry = geometry_for("AVR128DA64", AvrFamily::Dx, &dx).unwrap();
         assert_eq!(geometry.range, 0..0x2_0000);
         assert_eq!(geometry.page_size, 512);
 
-        let geometry = geometry_for("ATtiny406", &tiny).unwrap();
+        let geometry = geometry_for("ATtiny406", AvrFamily::Tiny0, &tiny).unwrap();
         assert_eq!(geometry.range, 0..0x1000);
         assert_eq!(geometry.page_size, 64);
     }
 
+    /// Without a flash region there is nothing to program, and that is the
+    /// broken target description it is, not a missing flash algorithm.
     #[test]
-    fn a_part_that_is_not_an_avr_gets_no_geometry() {
-        let memory_map = [nvm_region("PROGMEM", 0..0x2_0000, false)];
+    fn a_target_without_a_flash_region_names_the_broken_description() {
+        let memory_map = [nvm_region("EEPROM", 0x80_1400..0x80_1600, false)];
 
-        assert!(geometry_for("nRF52840", &memory_map).is_none());
+        let error = geometry_for("AVR128DA64", AvrFamily::Dx, &memory_map).unwrap_err();
+
+        assert!(matches!(
+            error,
+            FlashError::MissingAvrFlashRegion { ref name } if name == "AVR128DA64"
+        ));
     }
 
     #[test]

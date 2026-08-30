@@ -28,12 +28,22 @@ impl FlashPlan {
     }
 
     /// Plans the sectors and pages for `region` and adds it to this plan.
+    ///
+    /// A region the driver cannot program is refused here, before any page is
+    /// planned and before any phase can touch the target.
     pub(super) fn add_region(
         &mut self,
         region: NvmRegion,
         builder: &FlashBuilder,
         restore_unwritten_bytes: bool,
     ) -> Result<(), FlashError> {
+        if !self.driver.programs(&region) {
+            return Err(FlashError::RegionNotProgrammable {
+                driver: self.driver.name().to_string(),
+                range: region.range.clone(),
+            });
+        }
+
         let layout = builder.build_sectors_and_pages(
             &region,
             self.driver.geometry(),
@@ -201,6 +211,7 @@ mod tests {
         geometry: TestGeometry,
         phases: Rc<RefCell<Vec<Phase>>>,
         erases_on_write: bool,
+        programmable: bool,
     }
 
     impl NvmDriver for RecordingDriver {
@@ -214,6 +225,10 @@ mod tests {
 
         fn program_erases_page(&self) -> bool {
             self.erases_on_write
+        }
+
+        fn programs(&self, _region: &NvmRegion) -> bool {
+            self.programmable
         }
 
         fn is_chip_erase_supported(&self, _session: &Session) -> bool {
@@ -284,6 +299,7 @@ mod tests {
             geometry: TestGeometry,
             phases: phases.clone(),
             erases_on_write,
+            programmable: true,
         };
 
         let mut session = fake_session();
@@ -333,6 +349,7 @@ mod tests {
             geometry: TestGeometry,
             phases: phases.clone(),
             erases_on_write: false,
+            programmable: true,
         };
 
         let mut session = fake_session();
@@ -346,5 +363,42 @@ mod tests {
             Rc::try_unwrap(phases).unwrap().into_inner(),
             [Phase::EraseAll]
         );
+    }
+
+    /// Data for a region the driver cannot program is refused when the region
+    /// joins the plan, before the driver is asked for any phase.
+    #[test]
+    fn a_region_the_driver_cannot_program_is_refused_when_the_plan_is_built() {
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let driver = RecordingDriver {
+            geometry: TestGeometry,
+            phases: phases.clone(),
+            erases_on_write: false,
+            programmable: false,
+        };
+
+        let region = NvmRegion {
+            name: Some("config".to_string()),
+            range: 0x1000..0x1100,
+            cores: vec!["main".to_string()],
+            is_alias: false,
+            access: None,
+        };
+
+        let mut builder = FlashBuilder::new();
+        builder.add_data(0x1000, &[1, 2, 3]).unwrap();
+
+        let mut plan = FlashPlan::new(0, Box::new(driver));
+
+        let error = plan.add_region(region, &builder, false).unwrap_err();
+
+        assert!(matches!(
+            error,
+            FlashError::RegionNotProgrammable { ref driver, ref range }
+                if driver == "recording" && *range == (0x1000..0x1100)
+        ));
+
+        drop(plan);
+        assert!(Rc::try_unwrap(phases).unwrap().into_inner().is_empty());
     }
 }

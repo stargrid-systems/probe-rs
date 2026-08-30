@@ -56,7 +56,7 @@ fn drivers_for_regions(
         // A target whose probe or debug sequence programs flash directly supplies its own
         // driver. Only a target without one needs a flash algorithm, so only then is a
         // missing algorithm an error.
-        let driver = match nvm_driver::driver_for_region(session, &region, core_index) {
+        let driver = match nvm_driver::driver_for_region(session, &region, core_index)? {
             Some(driver) => driver,
             None => {
                 let target = session.target();
