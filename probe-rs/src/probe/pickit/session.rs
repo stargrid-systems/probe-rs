@@ -210,8 +210,10 @@ impl Pickit {
             SessionState::Debugging => ScriptName::ExitDebugMode,
         };
 
+        self.command(name)?.check()?;
         self.state = SessionState::Cold;
-        self.command(name)?.check()
+
+        Ok(())
     }
 
     /// Erases flash, EEPROM, and the lock bits.
@@ -269,8 +271,8 @@ impl Pickit {
     /// is the one the tool expects, which puts flash at an offset of `0x800000`
     /// and everything else at its native data-space address.
     ///
-    /// Short results arrive inside the response rather than on the data pipe,
-    /// and this returns them either way.
+    /// A zero-length request is answered by the inline result of the script
+    /// instead of the data pipe.
     pub fn read(
         &mut self,
         name: ScriptName,
@@ -284,8 +286,22 @@ impl Pickit {
         let (response, data) = self.finish(result)?;
         response.check()?;
 
-        if data.is_empty() {
-            return Ok(response.inline_data().to_vec());
+        Self::read_result(response.inline_data(), data, len)
+    }
+
+    /// Decides between the inline result and the data phase of a read.
+    ///
+    /// The tool writes exactly what was asked for, or nothing at all when the
+    /// answer fits in the response. A short data phase therefore means the
+    /// transfer went wrong, and zero-filling it would hand the caller bytes
+    /// that were never read.
+    fn read_result(inline: &[u8], data: Vec<u8>, len: usize) -> Result<Vec<u8>, PickitError> {
+        if len == 0 {
+            return Ok(inline.to_vec());
+        }
+
+        if data.len() < len {
+            return Err(PickitError::ShortDataPhase(data.len(), len));
         }
 
         Ok(data)
@@ -351,5 +367,35 @@ impl Pickit {
             SessionState::Locked => Err(PickitError::TargetLocked),
             SessionState::Hung => Err(PickitError::Hung),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A read that came back short is an error, not a silent zero-fill. The
+    /// tool writes exactly what was asked for or nothing at all.
+    #[test]
+    fn a_short_data_phase_is_an_error() {
+        let err = Pickit::read_result(&[], vec![0; 3], 4).unwrap_err();
+
+        assert!(matches!(err, PickitError::ShortDataPhase(3, 4)));
+    }
+
+    #[test]
+    fn a_full_data_phase_is_returned_as_it_came() {
+        let data = Pickit::read_result(&[], vec![0xaa; 4], 4).unwrap();
+
+        assert_eq!(data, vec![0xaa; 4]);
+    }
+
+    /// A zero-length request is answered inline. This is how a script hands
+    /// back a short result, such as the four bytes of `GetDeviceId`.
+    #[test]
+    fn a_zero_length_read_is_answered_inline() {
+        let data = Pickit::read_result(&[0x1e, 0x97, 0x07, 0x18], Vec::new(), 0).unwrap();
+
+        assert_eq!(data, &[0x1e, 0x97, 0x07, 0x18]);
     }
 }

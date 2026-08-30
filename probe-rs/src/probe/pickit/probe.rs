@@ -12,14 +12,7 @@ use crate::probe::{
     list::{ProbeListItem, usb_probe_accessibility},
 };
 
-use super::{Pickit, PickitError};
-
-/// The status value the tool answers on a cold connection.
-///
-/// A status query is a tool-level message rather than a script, so it is safe
-/// before a UPDI session exists. It is the only way to check that the tool
-/// answers at all without touching the target.
-const ERROR_STATUS_KEY: &str = "ERROR_STATUS_KEY";
+use super::{Pickit, PickitError, protocol::ERROR_STATUS_KEY};
 
 /// A factory for creating [`PickitProbe`] probes.
 #[derive(Debug)]

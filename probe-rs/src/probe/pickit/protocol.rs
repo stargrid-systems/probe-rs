@@ -32,7 +32,8 @@ const RESPONSE_LEN: usize = 512;
 const STATUS_OK: u32 = 0x0d;
 
 /// The status value the tool expects between a data phase and `script done`.
-const ERROR_STATUS_KEY: &str = "ERROR_STATUS_KEY";
+/// It is also the key a cold connection is probed with.
+pub(crate) const ERROR_STATUS_KEY: &str = "ERROR_STATUS_KEY";
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -167,7 +168,9 @@ impl Response {
     /// there. The word before it is not a marker, whatever it looks like most
     /// of the time, so nothing here may key on it.
     pub fn inline_data(&self) -> &[u8] {
-        let length = word(&self.payload, 4) as usize;
+        // Clamp before adding, or a device that claims a huge length
+        // overflows the arithmetic.
+        let length = (word(&self.payload, 4) as usize).min(self.payload.len());
         let start = 8;
         let end = (start + length).min(self.payload.len());
 
@@ -457,6 +460,11 @@ impl<'a> Stream<'a> {
             .send(MessageType::Upload, script, params, len)?;
         let response = self.transport.response()?;
 
+        // The error code rides in this response. A script that produced
+        // nothing never writes to the data endpoint, so reading it anyway
+        // would time out and latch a healthy tool as hung.
+        response.check()?;
+
         let data = read_packet(&mut self.transport.data_in, len, data_timeout(len));
         let mut data = self.transport.poison(data)?;
         data.truncate(len);
@@ -473,6 +481,9 @@ impl<'a> Stream<'a> {
         self.transport
             .send(MessageType::Download, script, params, data.len())?;
         let response = self.transport.response()?;
+
+        // Fail before any data moves, for the same reason as in `upload`.
+        response.check()?;
 
         if !data.is_empty() {
             self.send_data(data)?;
@@ -684,6 +695,21 @@ mod test {
         let response = Response::parse(&raw).unwrap();
 
         assert!(response.inline_data().is_empty());
+    }
+
+    /// A claimed inline length far past the payload must not overflow the
+    /// arithmetic. The result is capped at what the payload actually holds.
+    #[test]
+    fn an_over_long_inline_length_is_clamped() {
+        let mut raw = vec![0; 32];
+        raw[0] = 0x0d;
+        raw[8] = 32;
+        raw[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        raw[24..32].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let response = Response::parse(&raw).unwrap();
+
+        assert_eq!(response.inline_data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

@@ -132,6 +132,9 @@ pub enum PickitError {
     /// The PICkit sent a response that is too short to decode.
     ShortResponse,
 
+    /// The data phase carried {0} of the {1} bytes that were asked for.
+    ShortDataPhase(usize, usize),
+
     /// The message is {0} bytes, which is over the 2048 byte limit.
     MessageTooLong(usize),
 
