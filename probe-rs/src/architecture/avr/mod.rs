@@ -131,6 +131,15 @@ impl AvrCoreState {
             sw_breakpoints: [None; SW_BREAKPOINT_SLOTS],
         }
     }
+
+    /// The software breakpoint planted at `address`, if this session planted one.
+    fn software_breakpoint_at(&self, address: u64) -> Option<SoftwareBreakpoint> {
+        self.sw_breakpoints
+            .iter()
+            .flatten()
+            .find(|breakpoint| breakpoint.address == address)
+            .copied()
+    }
 }
 
 /// An interface to operate an AVR core.
@@ -210,22 +219,21 @@ impl<'probe> Avr<'probe> {
         let page_size = self.interface.family().flash_page_size();
         let (page, offset) = page_span(address, page_size);
 
+        // A backstop, not the real check. [`Avr::check_breakpoint_address`]
+        // keeps odd addresses out, and only those can push a word past the
+        // end of the page, where this would panic half way through a write.
+        if offset + 2 > page_size as usize {
+            return Err(Error::Other(format!(
+                "The instruction word at {address:#x} straddles the end of its flash page."
+            )));
+        }
+
         let mut buffer = vec![0u8; page_size as usize];
         self.interface.read_flash(page, &mut buffer)?;
         buffer[offset..offset + 2].copy_from_slice(&word.to_le_bytes());
         self.interface.write_flash(page, &buffer)?;
 
         Ok(())
-    }
-
-    /// The software breakpoint planted at `address`, if there is one.
-    fn software_breakpoint_at(&self, address: u64) -> Option<SoftwareBreakpoint> {
-        self.state
-            .sw_breakpoints
-            .iter()
-            .flatten()
-            .find(|breakpoint| breakpoint.address == address)
-            .copied()
     }
 
     /// Gets past a `BREAK` at the program counter without touching flash.
@@ -240,7 +248,7 @@ impl<'probe> Avr<'probe> {
     /// the second from flash, where it still is.
     fn step_over_software_breakpoint(&mut self) -> Result<bool, Error> {
         let pc = self.read_core_reg(PC.id)?.try_into()?;
-        let Some(breakpoint) = self.software_breakpoint_at(pc) else {
+        let Some(breakpoint) = self.state.software_breakpoint_at(pc) else {
             return Ok(false);
         };
 
@@ -257,6 +265,17 @@ impl<'probe> Avr<'probe> {
     /// of the page the address lands in, both now and again when the
     /// breakpoint is removed.
     fn plant_software_breakpoint(&mut self, slot: usize, address: u64) -> Result<(), Error> {
+        Self::check_breakpoint_address(address)?;
+
+        // Setting a breakpoint that this session already planted is a no-op.
+        // `Core::set_hw_breakpoint` promises that setting one again keeps it
+        // active, and the BREAK in flash is ours, with the instruction it
+        // replaced still remembered. Writing the page again would only cost
+        // another erase cycle.
+        if self.state.software_breakpoint_at(address).is_some() {
+            return Ok(());
+        }
+
         let original = self.read_flash_word(address)?;
 
         if original == ocd::BREAK_INSTRUCTION {
@@ -422,6 +441,41 @@ impl<'probe> Avr<'probe> {
                 "{address:#010x} is outside the AVR data space and cannot be a pointer register"
             ))
         })
+    }
+
+    /// Checks that `unit_index` names a hardware unit or a software slot.
+    ///
+    /// [`Core::set_hw_breakpoint`] and [`Core::clear_hw_breakpoint`] take their
+    /// index from [`Avr::available_breakpoint_units`], so an out-of-range index
+    /// means a caller ignored that count. Letting one through would index a
+    /// software slot that does not exist.
+    fn check_breakpoint_unit(unit_index: usize) -> Result<(), Error> {
+        let unit_count = HW_BREAKPOINT_UNITS + SW_BREAKPOINT_SLOTS;
+
+        if unit_index < unit_count {
+            return Ok(());
+        }
+
+        Err(Error::Other(format!(
+            "There is no breakpoint unit {unit_index}. This core has {unit_count}, \
+             and their indexes start at zero."
+        )))
+    }
+
+    /// Checks that `address` can be the start of an instruction.
+    ///
+    /// AVR instructions are word aligned, so an odd address falls inside one
+    /// and the word there is half of it. Replacing that word would corrupt the
+    /// instruction and lose whatever the breakpoint was meant to keep.
+    fn check_breakpoint_address(address: u64) -> Result<(), Error> {
+        if address.is_multiple_of(2) {
+            return Ok(());
+        }
+
+        Err(Error::Other(format!(
+            "Cannot plant a software breakpoint at {address:#x}. Breakpoint addresses \
+             must be even, because AVR instructions are word aligned."
+        )))
     }
 }
 
@@ -610,6 +664,8 @@ impl CoreInterface for Avr<'_> {
     }
 
     fn set_hw_breakpoint(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
+        Self::check_breakpoint_unit(unit_index)?;
+
         if let Some(slot) = unit_index.checked_sub(HW_BREAKPOINT_UNITS) {
             return self.plant_software_breakpoint(slot, addr);
         }
@@ -629,6 +685,8 @@ impl CoreInterface for Avr<'_> {
     }
 
     fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        Self::check_breakpoint_unit(unit_index)?;
+
         if let Some(slot) = unit_index.checked_sub(HW_BREAKPOINT_UNITS) {
             return self.remove_software_breakpoint(slot);
         }
@@ -834,5 +892,76 @@ mod tests {
         assert_eq!(state.hw_breakpoints, [None, None]);
         assert!(!state.breakpoints_enabled);
         assert!(!state.expecting_step);
+    }
+
+    /// A unit index has to name one of the two hardware units or one of the
+    /// four software slots. `set_hw_breakpoint` and `clear_hw_breakpoint` both
+    /// take this check, and before it was there an index of six or more reached
+    /// the software slots and panicked indexing them, with the BREAK already
+    /// written into flash.
+    #[test]
+    fn a_unit_index_past_the_software_slots_is_rejected() {
+        for unit_index in 0..HW_BREAKPOINT_UNITS + SW_BREAKPOINT_SLOTS {
+            assert!(
+                Avr::check_breakpoint_unit(unit_index).is_ok(),
+                "unit {unit_index}"
+            );
+        }
+
+        for unit_index in [
+            HW_BREAKPOINT_UNITS + SW_BREAKPOINT_SLOTS,
+            HW_BREAKPOINT_UNITS + SW_BREAKPOINT_SLOTS + 1,
+            100,
+        ] {
+            assert!(
+                Avr::check_breakpoint_unit(unit_index).is_err(),
+                "unit {unit_index}"
+            );
+        }
+    }
+
+    /// An odd address falls inside an instruction instead of starting one, so
+    /// planting a breakpoint there has to be refused before any flash is read
+    /// or written.
+    #[test]
+    fn an_odd_breakpoint_address_is_rejected() {
+        assert!(Avr::check_breakpoint_address(0).is_ok());
+        assert!(Avr::check_breakpoint_address(0x356).is_ok());
+        assert!(Avr::check_breakpoint_address(0x357).is_err());
+    }
+
+    /// Setting a breakpoint again, at an address this session has already
+    /// planted one at, has to find it again so `plant_software_breakpoint` can
+    /// return without touching flash. Which slot it sits in does not matter.
+    #[test]
+    fn a_breakpoint_this_session_planted_is_found_again() {
+        let mut state = AvrCoreState::new();
+
+        assert!(state.software_breakpoint_at(0x356).is_none());
+
+        state.sw_breakpoints[3] = Some(SoftwareBreakpoint {
+            address: 0x356,
+            original: 0x1234,
+        });
+
+        let found = state.software_breakpoint_at(0x356).unwrap();
+
+        assert_eq!(found.address, 0x356);
+        assert_eq!(found.original, 0x1234);
+        // A different address stays free, so it would still be planted.
+        assert!(state.software_breakpoint_at(0x358).is_none());
+    }
+
+    /// The backstop in `write_flash_word` refuses a word that would run past
+    /// the end of its page rather than panicking in `copy_from_slice`. Only the
+    /// last byte of a page can do that, and that byte is odd, so the even
+    /// address check keeps the backstop out of reach.
+    #[test]
+    fn a_word_at_the_last_byte_of_a_page_would_not_fit() {
+        for page_size in [64u32, 512] {
+            let (_, offset) = page_span(u64::from(page_size) - 1, page_size);
+
+            assert!(offset + 2 > page_size as usize, "{page_size}");
+        }
     }
 }
