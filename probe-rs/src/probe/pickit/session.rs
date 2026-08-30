@@ -215,7 +215,6 @@ impl Pickit {
 
         Ok(())
     }
-
     /// Erases flash, EEPROM, and the lock bits.
     ///
     /// This is the only way past a locked part. The lock state changes under
@@ -366,6 +365,25 @@ impl Pickit {
             SessionState::Cold => Err(PickitError::SessionNotOpen),
             SessionState::Locked => Err(PickitError::TargetLocked),
             SessionState::Hung => Err(PickitError::Hung),
+        }
+    }
+}
+
+impl Drop for Pickit {
+    fn drop(&mut self) {
+        // A session left open holds the target in reset until the tool is
+        // replugged, so a dropped session closes itself. A hung tool cannot
+        // answer and must not be asked, and `exit` is already a no-op then.
+        if self.state == SessionState::Cold || self.transport.is_poisoned() {
+            return;
+        }
+
+        tracing::debug!("Closing an open PICkit session on drop");
+        if let Err(err) = self.exit() {
+            tracing::warn!(
+                error = &err as &dyn std::error::Error,
+                "Could not close the PICkit session on drop"
+            );
         }
     }
 }

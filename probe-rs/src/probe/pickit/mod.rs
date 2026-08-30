@@ -39,6 +39,10 @@
 //!    and writes without touching the wire.
 //! 5. On the first timeout the tool is hung. The transport latches a poisoned
 //!    state, and every later call fails immediately. Retrying never helps.
+//!
+//! An open session also closes itself when the [`Pickit`] is dropped, so a
+//! failed attach cannot leave the target held in reset. A cold or hung tool
+//! does nothing on drop.
 
 use nusb::{DeviceInfo, Interface, MaybeFuture};
 
