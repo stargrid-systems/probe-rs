@@ -280,7 +280,10 @@ impl FlashAlgorithm {
             Architecture::Arm => 8,
             Architecture::Riscv => 16,
             Architecture::Xtensa => 16,
-            // AVR is byte addressed and has no stack alignment requirement beyond that.
+            // Aligns to the 2-byte instruction word. AVR flashing drives the
+            // NVM controller through the programmer's scripts and never
+            // assembles a flash algorithm today, so this exists only to make
+            // the match exhaustive.
             Architecture::Avr => 2,
         }
     }

@@ -27,12 +27,12 @@ pub const TRAPEN: u64 = 0x08;
 pub const CAUSE: u64 = 0x0C;
 /// The instruction to inject instead of the one in flash, write only.
 ///
-/// See [`crate::architecture::avr::Avr::inject_instruction`].
+/// See [`crate::architecture::avr::communication_interface::AvrCommunicationInterface::inject_instruction`].
 pub const INSN0: u64 = 0x10;
 /// The second word of an injected two-word instruction, write only.
 ///
 /// Supplying it changes what the program counter does. See
-/// [`crate::architecture::avr::Avr::inject_instruction_pair`].
+/// [`crate::architecture::avr::communication_interface::AvrCommunicationInterface::inject_instruction_pair`].
 pub const INSN1: u64 = 0x12;
 /// The program counter. Reads as the program counter plus one, see [`OcdVersion`].
 pub const PC: u64 = 0x14;

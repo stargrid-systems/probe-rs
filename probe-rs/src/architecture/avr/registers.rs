@@ -19,16 +19,11 @@ use std::sync::LazyLock;
 use crate::core::{RegisterDataType, UnwindRule};
 use crate::{CoreRegister, CoreRegisters, RegisterId, RegisterRole};
 
-/// The DWARF register column avr-gcc uses for the return address.
-///
-/// Measured from the CIE of an object built by avr-gcc 14.2.0. No core register
-/// holds the return address on AVR, because `call` pushes it onto the stack, so
-/// this number appears in call frame information and nowhere else.
-///
-/// It is here as a record of the measurement. An earlier derivation of 37 was
-/// wrong. gimli reads the column out of the CIE itself, so probe-rs never has to
-/// supply it.
-pub const RETURN_ADDRESS_DWARF_COLUMN: u16 = 36;
+// The return address lives in DWARF column 36, measured from the CIE of an
+// object built by avr-gcc 14.2.0. An earlier derivation of 37 was wrong. No
+// core register holds the return address on AVR, because `call` pushes it onto
+// the stack, and gimli reads the column out of the CIE itself, so probe-rs
+// never has to supply it.
 
 /// Builds one of the 32 general purpose registers.
 macro_rules! gpr {
