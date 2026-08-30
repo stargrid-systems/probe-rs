@@ -1052,7 +1052,9 @@ impl FlashLoader {
                     .progress
                     .add_progress_bar(ProgressOperation::Fill, Some(fill_size));
             }
-            if !options.do_chip_erase {
+            // A driver that erases each page as it programs it never runs an erase
+            // phase, so it gets no bar.
+            if !options.do_chip_erase && !plan.driver.program_erases_page() {
                 options
                     .progress
                     .add_progress_bar(ProgressOperation::Erase, Some(erase_size));
