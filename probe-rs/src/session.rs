@@ -507,13 +507,6 @@ impl Session {
 
             tracing::info!("Connected to an AVR with signature {device_id}");
         }
-        {
-            let mut interface = probe.try_get_avr_interface(&mut state)?;
-            interface.enter_programming_mode()?;
-
-            let device_id = interface.device_id()?;
-            tracing::info!("Connected to an AVR with signature {device_id}");
-        }
 
         Ok(Session {
             target,
