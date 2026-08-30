@@ -1,23 +1,26 @@
-//! The script blobs the tool runs, and where they come from.
+//! The scripts the tool runs, and where they come from.
 //!
-//! The tool has no built-in operations. Every operation is a blob of bytecode
-//! that Microchip publishes per device in the tool pack, next to a
-//! `ri4command` value that hints at the transfer type the blob was written for.
+//! The tool has no built-in operations. Every operation is a short bytecode
+//! program for the register machine in its firmware, next to a `ri4command`
+//! value that hints at the transfer type the program was written for.
 //!
-//! [`AvrFamily`] is the built-in source. It carries the blobs for the two AVR
-//! families this driver supports. [`ScriptSource`] is the seam, so another
-//! implementation can index a downloaded pack from a user cache or hand out
-//! fixtures in a test.
+//! The bytecode this crate runs is not copied from Microchip. It is emitted
+//! at runtime by [`AvrFamily`], with each script written as the sequence of
+//! UPDI operations it performs. The instruction set and the script semantics
+//! come from static analysis of the tool firmware, cross-checked against the
+//! register maps this driver uses. [`ScriptSource`] is the seam, so another
+//! implementation can hand out scripts from somewhere else, such as a
+//! downloaded tool pack or a test fixture.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use super::blobs;
+use super::builtins;
 
 /// Bit 31 of `ri4command` marks a script that moves data over the data pipe.
 const RI4_DATA_TRANSFER: u32 = 0x8000_0000;
 
-/// One script blob for one operation on one device.
+/// One bytecode program for one operation on one device.
 ///
 /// # Examples
 ///
@@ -83,10 +86,9 @@ impl Script {
 
 /// The scripts this driver uses, named as the tool pack names them.
 ///
-/// This is every UPDI script the pack ships for the supported parts. Run
-/// control has its own scripts here rather than going through raw writes to
-/// the memory-mapped debug block, because these are the ones that were proven
-/// on hardware.
+/// This is every script the driver's call sites run. Run control has its own
+/// scripts here rather than going through raw writes to the memory-mapped
+/// debug block, because these are the ones that were proven on hardware.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptName {
     /// Opens a UPDI session for programming. The only safe first operation.
@@ -97,73 +99,20 @@ pub enum ScriptName {
     EnterDebugMode,
     /// Closes a debug session.
     ExitDebugMode,
-    /// Enters programming mode with a high-voltage pulse.
-    EnterProgModeHvSp,
-    /// Enters programming mode with a high-voltage pulse and a reset.
-    EnterProgModeHvSpRst,
-    /// Enters programming mode with a high voltage pulse while the operator
-    /// power-cycles the target.
-    EnterProgModeHvUpt,
-    /// Enters debug mode with a high-voltage pulse.
-    EnterDebugModeHvSp,
-    /// Enters debug mode with a high-voltage pulse and a reset.
-    EnterDebugModeHvSpRst,
-    /// Enters debug mode with a high-voltage pulse while the operator
-    /// power-cycles the target.
-    EnterDebugModeHvUpt,
     /// Sets the UPDI clock of the tool in kHz. Takes one word.
     SetSpeed,
     /// Reads the device signature. Returns its result inline.
     GetDeviceId,
-    /// Reads the System Information Block.
-    ReadSib,
     /// Erases flash, EEPROM, and the lock bits.
     EraseChip,
     /// Reads data space one byte at a time. Takes an address and a length.
     ReadMem8,
     /// Writes data space one byte at a time. Takes an address and a length.
     WriteMem8,
-    /// Reads data space one word at a time. Takes an address and a length.
-    ///
-    /// Only correct on word-organised memory at an even address, which is
-    /// flash and the signature row. On SRAM, the fuses and the EEPROM it
-    /// returns the byte at the even address twice. The driver reads the data
-    /// space with [`ScriptName::ReadMem8`] instead.
-    ReadMem16,
-    /// Writes data space one word at a time. Takes an address and a length.
-    ///
-    /// Carries the same restriction as [`ScriptName::ReadMem16`], and fails the
-    /// same silent way: on byte-organised memory it stores the low byte of each
-    /// word and leaves the odd byte untouched.
-    WriteMem16,
     /// Reads flash. Takes an address and a length.
     ReadProgmem,
     /// Writes flash. Takes an address and a length.
     WriteProgmem,
-    /// Reads EEPROM. Takes an address and a length.
-    ReadDataEeMem,
-    /// Writes EEPROM. Takes an address and a length.
-    WriteDataEeMem,
-    /// Reads the configuration memory. Takes an address and a length.
-    ReadConfigmem,
-    /// Writes the configuration memory. Takes an address and a length.
-    WriteConfigmem,
-    /// Reads a fuse. Takes an address and a length.
-    ReadConfigmemFuse,
-    /// Writes a fuse. Takes an address and a length.
-    WriteConfigmemFuse,
-    /// Reads the lock bits. Takes an address and a length.
-    ReadConfigmemLock,
-    /// Writes the lock bits. Takes an address and a length.
-    WriteConfigmemLock,
-    /// Reads the user row. Takes an address and a length.
-    ReadIdMem,
-    /// Writes the user row. Takes an address and a length.
-    WriteIdMem,
-    /// Reads a UPDI control and status register. Takes one byte.
-    ReadCsReg,
-    /// Writes a UPDI control and status register. Takes two bytes.
-    WriteCsReg,
     /// Stops the core.
     Halt,
     /// Starts the core.
@@ -176,60 +125,28 @@ pub enum ScriptName {
     GetPc,
     /// Writes the program counter. Takes the new value.
     SetPc,
-    /// Arms a hardware breakpoint. Takes the address.
+    /// Arms a hardware breakpoint. Takes the unit index and the word address.
     SetHwBp,
-    /// Disarms a hardware breakpoint.
+    /// Disarms a hardware breakpoint. Takes the unit index.
     ClearHwBp,
     /// Resets the core and stops it at the reset vector.
     DebugReset,
-    /// Asserts reset and keeps it asserted.
-    ///
-    /// Do not run this on its own. Unlike every script that is known to work,
-    /// its bytecode has no `0x5a` terminator, and running it hangs the tool.
-    HoldInReset,
-    /// Releases a reset asserted by [`ScriptName::HoldInReset`].
-    ///
-    /// Do not run this on its own, for the same reason as
-    /// [`ScriptName::HoldInReset`]. Use [`ScriptName::DebugReset`] to get a
-    /// part out of the reset that opening a session asserts.
-    ReleaseFromReset,
 }
 
 impl ScriptName {
     /// Every script name, in declaration order.
-    pub const ALL: [ScriptName; 43] = [
+    pub const ALL: [ScriptName; 20] = [
         ScriptName::EnterProgMode,
         ScriptName::ExitProgMode,
         ScriptName::EnterDebugMode,
         ScriptName::ExitDebugMode,
-        ScriptName::EnterProgModeHvSp,
-        ScriptName::EnterProgModeHvSpRst,
-        ScriptName::EnterProgModeHvUpt,
-        ScriptName::EnterDebugModeHvSp,
-        ScriptName::EnterDebugModeHvSpRst,
-        ScriptName::EnterDebugModeHvUpt,
         ScriptName::SetSpeed,
         ScriptName::GetDeviceId,
-        ScriptName::ReadSib,
         ScriptName::EraseChip,
         ScriptName::ReadMem8,
         ScriptName::WriteMem8,
-        ScriptName::ReadMem16,
-        ScriptName::WriteMem16,
         ScriptName::ReadProgmem,
         ScriptName::WriteProgmem,
-        ScriptName::ReadDataEeMem,
-        ScriptName::WriteDataEeMem,
-        ScriptName::ReadConfigmem,
-        ScriptName::WriteConfigmem,
-        ScriptName::ReadConfigmemFuse,
-        ScriptName::WriteConfigmemFuse,
-        ScriptName::ReadConfigmemLock,
-        ScriptName::WriteConfigmemLock,
-        ScriptName::ReadIdMem,
-        ScriptName::WriteIdMem,
-        ScriptName::ReadCsReg,
-        ScriptName::WriteCsReg,
         ScriptName::Halt,
         ScriptName::Run,
         ScriptName::SingleStep,
@@ -239,8 +156,6 @@ impl ScriptName {
         ScriptName::SetHwBp,
         ScriptName::ClearHwBp,
         ScriptName::DebugReset,
-        ScriptName::HoldInReset,
-        ScriptName::ReleaseFromReset,
     ];
 
     /// The name of the script in the tool pack.
@@ -258,34 +173,13 @@ impl ScriptName {
             ScriptName::ExitProgMode => "ExitProgMode_UPDI",
             ScriptName::EnterDebugMode => "EnterDebugMode_UPDI",
             ScriptName::ExitDebugMode => "ExitDebugMode_UPDI",
-            ScriptName::EnterProgModeHvSp => "EnterProgModeHvSp_UPDI",
-            ScriptName::EnterProgModeHvSpRst => "EnterProgModeHvSpRst_UPDI",
-            ScriptName::EnterProgModeHvUpt => "EnterProgModeHvUpt_UPDI",
-            ScriptName::EnterDebugModeHvSp => "EnterDebugModeHvSp_UPDI",
-            ScriptName::EnterDebugModeHvSpRst => "EnterDebugModeHvSpRst_UPDI",
-            ScriptName::EnterDebugModeHvUpt => "EnterDebugModeHvUpt_UPDI",
             ScriptName::SetSpeed => "SetSpeed_UPDI",
             ScriptName::GetDeviceId => "GetDeviceID_UPDI",
-            ScriptName::ReadSib => "ReadSIB_UPDI",
             ScriptName::EraseChip => "EraseChip_UPDI",
             ScriptName::ReadMem8 => "ReadMem8_UPDI",
             ScriptName::WriteMem8 => "WriteMem8_UPDI",
-            ScriptName::ReadMem16 => "ReadMem16_UPDI",
-            ScriptName::WriteMem16 => "WriteMem16_UPDI",
             ScriptName::ReadProgmem => "ReadProgmem_UPDI",
             ScriptName::WriteProgmem => "WriteProgmem_UPDI",
-            ScriptName::ReadDataEeMem => "ReadDataEEmem_UPDI",
-            ScriptName::WriteDataEeMem => "WriteDataEEmem_UPDI",
-            ScriptName::ReadConfigmem => "ReadConfigmem_UPDI",
-            ScriptName::WriteConfigmem => "WriteConfigmem_UPDI",
-            ScriptName::ReadConfigmemFuse => "ReadConfigmemFuse_UPDI",
-            ScriptName::WriteConfigmemFuse => "WriteConfigmemFuse_UPDI",
-            ScriptName::ReadConfigmemLock => "ReadConfigmemLock_UPDI",
-            ScriptName::WriteConfigmemLock => "WriteConfigmemLock_UPDI",
-            ScriptName::ReadIdMem => "ReadIDmem_UPDI",
-            ScriptName::WriteIdMem => "WriteIDmem_UPDI",
-            ScriptName::ReadCsReg => "ReadCSreg_UPDI",
-            ScriptName::WriteCsReg => "WriteCSreg_UPDI",
             ScriptName::Halt => "Halt_UPDI",
             ScriptName::Run => "Run_UPDI",
             ScriptName::SingleStep => "SingleStep_UPDI",
@@ -295,8 +189,6 @@ impl ScriptName {
             ScriptName::SetHwBp => "SetHWBP_UPDI",
             ScriptName::ClearHwBp => "ClearHWBP_UPDI",
             ScriptName::DebugReset => "DebugReset_UPDI",
-            ScriptName::HoldInReset => "HoldInReset_UPDI",
-            ScriptName::ReleaseFromReset => "ReleaseFromReset_UPDI",
         }
     }
 }
@@ -307,21 +199,23 @@ impl std::fmt::Display for ScriptName {
     }
 }
 
-/// Where the driver looks up the script blobs for one target device.
+/// Where the driver looks up the scripts for one target device.
 ///
-/// [`AvrFamily`] implements this with the blobs that ship with probe-rs.
-/// Implement it yourself to run blobs from somewhere else, such as a tool pack
-/// the user downloaded.
+/// [`AvrFamily`] implements this with the scripts probe-rs generates.
+/// Implement it yourself to supply scripts from somewhere else, such as a
+/// downloaded tool pack or a test fixture.
 pub trait ScriptSource: Send + std::fmt::Debug {
     /// Returns the script for `name`, or `None` when this source does not have it.
     fn script(&self, name: ScriptName) -> Option<&Script>;
 }
 
-/// The AVR families probe-rs ships script blobs for.
+/// The AVR families probe-rs generates scripts for.
 ///
-/// Two tables cover every supported part. Eleven of the 43 scripts differ
-/// between the families, because the two use a different NVM controller
-/// generation and a different on-chip debug version. The rest are identical.
+/// Two tables cover every supported part. Five of the scripts differ between
+/// the families: the three NVM scripts, because the families use different
+/// NVM controller generations and page sizes, and the two breakpoint scripts,
+/// because only the Dx parts have flash that needs a 17-bit address. The rest
+/// are identical.
 ///
 /// # Examples
 ///
@@ -412,9 +306,9 @@ impl AvrFamily {
     ///
     /// `WriteProgmem` erases and programs whole pages, and `ReadProgmem`
     /// steps a page at a time. Neither takes the page size as a parameter,
-    /// because it is baked into the bytecode as an immediate at offset 13.
-    /// The values here are the ones read out of those blobs, so the host and
-    /// the tool cannot disagree.
+    /// because the scripts take it from an immediate in their bytecode. The
+    /// script builders take the value from here, so the host and the tool
+    /// cannot disagree.
     ///
     /// The target description has nowhere to put this. A page size lives in a
     /// flash algorithm, and these parts have none.
@@ -437,10 +331,7 @@ impl AvrFamily {
 
 impl ScriptSource for AvrFamily {
     fn script(&self, name: ScriptName) -> Option<&Script> {
-        Some(match self {
-            AvrFamily::Dx => blobs::dx(name),
-            AvrFamily::Tiny0 => blobs::tiny0(name),
-        })
+        builtins::table(*self).get(&name)
     }
 }
 
