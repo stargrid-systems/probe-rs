@@ -255,13 +255,15 @@ fn preceded_by_call(memory: &mut dyn MemoryInterface, return_address: u64) -> bo
 mod test {
     use std::path::PathBuf;
 
+    use gimli::UnitOffset;
     use probe_rs::architecture::avr::communication_interface::DATA_SPACE_OFFSET;
     use probe_rs::architecture::avr::registers::AVR_CORE_REGISTERS;
-    use probe_rs::{MemoryInterface, RegisterRole, RegisterValue, test::MockMemory};
+    use probe_rs::{MemoryInterface, RegisterId, RegisterRole, RegisterValue, test::MockMemory};
 
     use super::{AvrExceptionHandler, preceded_by_call};
     use crate::exception_handling::ExceptionInterface;
-    use crate::{DebugInfo, DebugRegisters};
+    use crate::unit_info::ExpressionResult;
+    use crate::{DebugInfo, DebugRegisters, StackFrameInfo, VariableLocation};
 
     /// Where the stack pointer stood when the real target was halted in `level4`.
     ///
@@ -570,5 +572,115 @@ mod test {
             .read_8(HALTED_STACK_POINTER + 1 + 19, &mut stack)
             .unwrap();
         assert_eq!(u16::from_be_bytes(stack), 0x011C);
+    }
+
+    /// The compilation unit that holds the local `i` of `rem_pio2`.
+    ///
+    /// That unit covers pc `0x05ec`, but its `.debug_ranges` entries are all
+    /// degenerate, so [`DebugInfo::compile_unit_info`] cannot find it. Match
+    /// the DIE itself instead: unit offset `0xec5`, carrying location list
+    /// `0x18b4`, whose entry for pc `0x05ec..0x0710` is
+    /// `DW_OP_breg28 (r28): 17`, a register relative address.
+    fn rem_pio2_unit(debug_info: &DebugInfo) -> &crate::unit_info::UnitInfo {
+        debug_info
+            .unit_infos
+            .iter()
+            .find(|unit_info| {
+                let Ok(die) = unit_info.unit.entry(UnitOffset(0xEC5)) else {
+                    return false;
+                };
+                matches!(
+                    die.attr_value(gimli::DW_AT_location),
+                    Some(gimli::AttributeValue::LocationListsRef(offset))
+                        if offset.0 == 0x18b4
+                )
+            })
+            .expect("the fixture must contain the rem_pio2 local `i`")
+    }
+
+    /// Registers halted inside the location list entry of the `rem_pio2`
+    /// local, with a known value in the register the entry is relative to.
+    fn registers_in_rem_pio2() -> DebugRegisters {
+        let mut registers = halted_registers();
+
+        registers
+            .get_register_mut(probe_rs::architecture::avr::registers::PC.id)
+            .unwrap()
+            .value = Some(RegisterValue::U32(0x5EC));
+        registers.get_register_mut(RegisterId(28)).unwrap().value = Some(RegisterValue::U32(0x42));
+
+        registers
+    }
+
+    /// A variable whose location comes from a location list must land in the
+    /// data space too, not just one whose location is a plain expression.
+    ///
+    /// The unit declares a two byte DWARF address size, so gimli has masked
+    /// the tag away by the time the expression finishes.
+    #[test]
+    fn location_list_addresses_carry_the_data_space_tag() {
+        let debug_info = call_chain_debug_info();
+        let mut memory = call_chain_memory();
+        let registers = registers_in_rem_pio2();
+
+        let unit_info = rem_pio2_unit(&debug_info);
+        let die = unit_info.unit.entry(UnitOffset(0xEC5)).unwrap();
+
+        let result = unit_info
+            .extract_location(
+                &debug_info,
+                &die,
+                &VariableLocation::Unknown,
+                &mut memory,
+                StackFrameInfo {
+                    registers: &registers,
+                    frame_base: None,
+                    canonical_frame_address: None,
+                    scanned: false,
+                },
+            )
+            .unwrap();
+
+        match result {
+            ExpressionResult::Location(VariableLocation::Address(address)) => {
+                assert_eq!(address, DATA_SPACE_OFFSET + 0x42 + 17);
+            }
+            other => panic!("Expected an address location, got {other:?}"),
+        }
+    }
+
+    /// A register relative location must not be evaluated for a scanned frame,
+    /// because the registers still belong to the innermost frame.
+    ///
+    /// This rides on the same `rem_pio2` DIE as
+    /// [`location_list_addresses_carry_the_data_space_tag`].
+    #[test]
+    fn register_relative_locations_are_unavailable_for_scanned_frames() {
+        let debug_info = call_chain_debug_info();
+        let mut memory = call_chain_memory();
+        let registers = registers_in_rem_pio2();
+
+        let unit_info = rem_pio2_unit(&debug_info);
+        let die = unit_info.unit.entry(UnitOffset(0xEC5)).unwrap();
+
+        let result = unit_info
+            .extract_location(
+                &debug_info,
+                &die,
+                &VariableLocation::Unknown,
+                &mut memory,
+                StackFrameInfo {
+                    registers: &registers,
+                    frame_base: None,
+                    canonical_frame_address: None,
+                    scanned: true,
+                },
+            )
+            .unwrap();
+
+        match result {
+            ExpressionResult::Location(VariableLocation::Unavailable) => {}
+            other => panic!("Expected an unavailable location, got {other:?}"),
+        }
     }
 }

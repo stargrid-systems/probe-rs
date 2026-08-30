@@ -1,8 +1,8 @@
 use std::{collections::HashMap, ops::Range};
 
 use super::{
-    DebugError, DebugRegisters, EndianReader, SourceLocation, VariableCache, debug_info::*,
-    extract_byte_size, extract_file, extract_line, function_die::FunctionDie, variable::*,
+    DebugError, EndianReader, SourceLocation, VariableCache, debug_info::*, extract_byte_size,
+    extract_file, extract_line, function_die::FunctionDie, variable::*,
 };
 use crate::{language, stack_frame::StackFrameInfo};
 use gimli::{
@@ -10,6 +10,7 @@ use gimli::{
     UnitOffset,
 };
 use probe_rs::MemoryInterface;
+use probe_rs::architecture::avr::communication_interface::DATA_SPACE_OFFSET;
 
 /// The result of `UnitInfo::evaluate_expression()` can be the value of a variable, or a memory location.
 #[derive(Debug)]
@@ -1805,14 +1806,18 @@ impl UnitInfo {
                         ExpressionResult::Location(location)
                     }
 
-                    gimli::AttributeValue::LocationListsRef(location_list_offset) => self
-                        .evaluate_location_list_ref(
+                    gimli::AttributeValue::LocationListsRef(location_list_offset) => {
+                        avr_data_space(
                             debug_info,
-                            location_list_offset,
-                            frame_info,
-                            memory,
+                            self.evaluate_location_list_ref(
+                                debug_info,
+                                location_list_offset,
+                                frame_info,
+                                memory,
+                            )
+                            .convert_incomplete()?,
                         )
-                        .convert_incomplete()?,
+                    }
 
                     other_attribute_value => {
                         ExpressionResult::Location(VariableLocation::Unsupported(format!(
@@ -2029,7 +2034,7 @@ impl UnitInfo {
                 EvaluationResult::RequiresRegister {
                     register,
                     base_type,
-                } => provide_register(frame_info.registers, register, base_type, &mut evaluation)?,
+                } => provide_register(frame_info, register, base_type, &mut evaluation)?,
                 EvaluationResult::RequiresRelocatedAddress(address_index) => {
                     // The address_index as an offset from 0, so just pass it into the next step.
                     evaluation.resume_with_relocated_address(address_index)?
@@ -2379,12 +2384,21 @@ fn extract_name(
 
 /// Gets necessary register information for the DWARF resolver.
 fn provide_register(
-    stack_frame_registers: &DebugRegisters,
+    frame_info: StackFrameInfo<'_>,
     register: gimli::Register,
     base_type: UnitOffset,
     evaluation: &mut gimli::Evaluation<EndianReader>,
 ) -> Result<EvaluationResult<EndianReader>, DebugError> {
-    match stack_frame_registers
+    if frame_info.scanned {
+        // A register relative address is built from the innermost frame's
+        // registers, which do not belong to a scanned frame.
+        return Err(DebugError::WarnAndContinue {
+            message: UnitInfo::SCANNED_FRAME.to_string(),
+        });
+    }
+
+    match frame_info
+        .registers
         .get_register_by_dwarf_id(register.0)
         .and_then(|reg| reg.value)
     {
@@ -2513,7 +2527,7 @@ impl RangeExt for gimli::Range {
 /// Puts an AVR variable address back in the data space.
 ///
 /// probe-rs separates the two AVR memories by placing the data space at
-/// [`AVR_DATA_SPACE`] and flash below it. avr-gcc tags addresses the same way in
+/// [`DATA_SPACE_OFFSET`] and flash below it. avr-gcc tags addresses the same way in
 /// the ELF, but most compilation units it emits declare a two byte DWARF address
 /// size, and gimli masks every evaluated address down to that. The tag is gone by
 /// the time an expression finishes, so `Y = 0x807fbb` comes back as `0x7fbb` and
@@ -2527,18 +2541,15 @@ impl RangeExt for gimli::Range {
 /// Addresses that already carry the tag are left alone, so a unit with a four
 /// byte address size is unaffected.
 fn avr_data_space(debug_info: &DebugInfo, result: ExpressionResult) -> ExpressionResult {
-    /// Where probe-rs puts the AVR data space.
-    const AVR_DATA_SPACE: u64 = 0x0080_0000;
-
     if !debug_info.is_avr {
         return result;
     }
 
     match result {
         ExpressionResult::Location(VariableLocation::Address(address))
-            if address < AVR_DATA_SPACE =>
+            if address < DATA_SPACE_OFFSET =>
         {
-            ExpressionResult::Location(VariableLocation::Address(address + AVR_DATA_SPACE))
+            ExpressionResult::Location(VariableLocation::Address(address + DATA_SPACE_OFFSET))
         }
         other => other,
     }

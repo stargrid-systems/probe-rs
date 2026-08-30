@@ -62,7 +62,8 @@ pub struct StackFrame {
     /// True when this frame came from a stack scan rather than unwind info.
     ///
     /// The function name, the source location and the program counter are still
-    /// good. The locals are not, so they are not offered.
+    /// good. The locals are not: they are still listed, but each one reports an
+    /// error message instead of an evaluated value.
     ///
     /// Measured on an AVR128DA64, where the scan restores only the program
     /// counter and the stack pointer. Every calling frame read its locals out of
