@@ -95,10 +95,14 @@ fn poll_sysrst(e: &mut Emitter, value: u32) {
 }
 
 /// Waits until the NVM controller reports idle.
+///
+/// Uses `r2`, like the vendor scripts: `r0` and `r1` carry the caller's
+/// address and length parameters and must survive this wait.
 fn wait_nvm_idle(e: &mut Emitter, timeout: u16) {
-    e.load_imm32(0, NVM_STATUS);
+    e.load_imm32(2, NVM_STATUS);
     e.tick();
-    e.read_word(0);
+    e.read_word(2);
+    e.delay_ms(2);
     e.poll(0x3, 0x0, timeout);
 }
 
