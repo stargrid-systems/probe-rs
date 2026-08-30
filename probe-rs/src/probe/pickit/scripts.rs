@@ -268,6 +268,21 @@ impl AvrFamily {
         }
     }
 
+    /// The device signature a target name must read back on attach.
+    ///
+    /// The values come from the device ATDFs, and the AVR128DA64 and
+    /// ATtiny406 ones were also measured on real parts. A target this table
+    /// does not know is not checked, so new families flash until someone
+    /// measures them.
+    pub fn expected_signature(device_name: &str) -> Option<u32> {
+        match device_name {
+            "AVR128DA64" => Some(0x1E_97_07),
+            "AVR128DB64" => Some(0x1E_97_0B),
+            "ATtiny406" => Some(0x1E_92_25),
+            _ => None,
+        }
+    }
+
     /// The address the flash scripts give to the first byte of flash.
     ///
     /// The flash scripts do not address flash from zero. They place it above

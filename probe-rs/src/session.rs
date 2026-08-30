@@ -491,6 +491,20 @@ impl Session {
             }
 
             let device_id = interface.device_id()?;
+
+            // A mismatch means the wrong target is selected for the attached
+            // part, which would flash geometry it does not have.
+            if let Some(expected) = AvrFamily::expected_signature(&target.name)
+                && device_id.signature() != expected
+            {
+                return Err(Error::Other(format!(
+                    "{} reads signature {:#08x}, but that target expects {expected:#08x}. \
+                     A different part is attached, or the wrong target is selected.",
+                    target.name,
+                    device_id.signature()
+                )));
+            }
+
             tracing::info!("Connected to an AVR with signature {device_id}");
         }
         {
