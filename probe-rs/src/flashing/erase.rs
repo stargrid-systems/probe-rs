@@ -230,6 +230,13 @@ pub fn erase(
             .map(to_flash_sector)
             .collect::<Vec<_>>();
 
+        // A range can touch only non-programmable memory, which the geometry
+        // reports no sectors for. Nothing to erase then, so skip the driver.
+        if sectors.is_empty() {
+            tracing::debug!("     -- no sectors to erase, ignoring!");
+            continue;
+        }
+
         let restore_data = if restore {
             read_restore_data(
                 el.driver.as_mut(),
