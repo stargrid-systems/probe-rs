@@ -211,14 +211,24 @@ mod builtin {
         fn load(
             &self,
             flash_loader: &mut FlashLoader,
-            _session: &mut Session,
+            session: &mut Session,
             file: &mut dyn ImageReader,
         ) -> Result<(), FileDownloadError> {
             const VECTOR_TABLE_SECTION_NAME: &str = ".vector_table";
             let mut elf_buffer = Vec::new();
             file.read_to_end(&mut elf_buffer)?;
 
-            let extracted_data = extract_from_elf(&elf_buffer, &self.0)?;
+            // A caller that left the default skip list empty still gets the
+            // AVR sections skipped, because toolchains put fuses and EEPROM
+            // in the ELF and flashing them would fail.
+            let options = ElfOptions {
+                skip_sections: self.0.skip_sections.clone(),
+                skip_sections_by_default: self
+                    .0
+                    .effective_skip_sections_by_default(&session.target().cores),
+            };
+
+            let extracted_data = extract_from_elf(&elf_buffer, &options)?;
 
             if extracted_data.is_empty() {
                 tracing::warn!("No loadable segments were found in the ELF file.");

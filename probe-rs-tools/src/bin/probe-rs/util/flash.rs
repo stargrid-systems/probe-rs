@@ -182,7 +182,7 @@ fn non_flash_sections(target: &Target) -> Vec<String> {
         return Vec::new();
     }
 
-    [".eeprom", ".fuse", ".lock", ".signature", ".user_signatures"]
+    probe_rs::flashing::AVR_NON_FLASH_SECTIONS
         .iter()
         .map(|name| name.to_string())
         .collect()

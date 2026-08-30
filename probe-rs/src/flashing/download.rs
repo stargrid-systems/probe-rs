@@ -1,4 +1,4 @@
-use probe_rs_target::InstructionSet;
+use probe_rs_target::{CoreType, InstructionSet};
 #[cfg(feature = "builtin-formats")]
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,57 @@ pub struct ElfOptions {
     /// Kept apart from [`ElfOptions::skip_sections`] so that leaving one out
     /// can be reported. A caller that names a section knows it is going; one
     /// that does not should be told.
+    ///
+    /// An empty list is filled in with [`AVR_NON_FLASH_SECTIONS`] when the
+    /// target is an AVR, so library consumers get the same behavior as the
+    /// CLI. The skip is name-based and ELF-only: a HEX file carrying data in
+    /// the EEPROM range is not skipped and fails with the region error
+    /// instead.
     pub skip_sections_by_default: Vec<String>,
+}
+
+/// ELF section names that hold memory outside flash on AVR targets.
+///
+/// AVR toolchains emit these for fuses and EEPROM. Flashing them would fail,
+/// because the AVR flash driver only programs flash, so the loader skips them
+/// (with a warning) unless the caller asked for them explicitly.
+#[cfg(feature = "builtin-formats")]
+pub const AVR_NON_FLASH_SECTIONS: [&str; 8] = [
+    ".eeprom",
+    ".fuse",
+    ".lfuse",
+    ".hfuse",
+    ".efuse",
+    ".lock",
+    ".signature",
+    ".user_signatures",
+];
+
+#[cfg(feature = "builtin-formats")]
+impl ElfOptions {
+    /// The default sections to skip for the cores of `target`.
+    ///
+    /// AVR cores get [`AVR_NON_FLASH_SECTIONS`]; everything else gets an empty
+    /// list. A list the caller filled in is authoritative and is returned
+    /// unchanged.
+    pub fn effective_skip_sections_by_default(
+        &self,
+        cores: &[probe_rs_target::Core],
+    ) -> Vec<String> {
+        if !self.skip_sections_by_default.is_empty() {
+            return self.skip_sections_by_default.clone();
+        }
+
+        let is_avr = cores.iter().any(|core| core.core_type == CoreType::Avr);
+        if !is_avr {
+            return Vec::new();
+        }
+
+        AVR_NON_FLASH_SECTIONS
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    }
 }
 
 /// A finite list of all the errors that can occur when flashing a given file.
@@ -203,4 +253,64 @@ pub fn download_file_with_options(
     loader
         .commit(session, options)
         .map_err(FileDownloadError::Flash)
+}
+
+#[cfg(all(test, feature = "builtin-formats"))]
+mod tests {
+    use super::*;
+    use probe_rs_target::{AvrCoreAccessOptions, Core, CoreAccessOptions};
+
+    fn core(core_type: CoreType) -> Core {
+        let core_access_options = match core_type {
+            CoreType::Avr => CoreAccessOptions::Avr(AvrCoreAccessOptions {}),
+            _ => CoreAccessOptions::Arm(probe_rs_target::ArmCoreAccessOptions::default()),
+        };
+
+        Core {
+            name: "main".to_string(),
+            core_type,
+            core_access_options,
+        }
+    }
+
+    #[test]
+    fn an_avr_target_skips_the_standard_non_flash_sections() {
+        let options = ElfOptions::default();
+        let cores = [core(CoreType::Avr)];
+
+        let skipped = options.effective_skip_sections_by_default(&cores);
+        assert_eq!(
+            skipped,
+            AVR_NON_FLASH_SECTIONS
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_non_avr_target_skips_nothing_by_default() {
+        let options = ElfOptions::default();
+        let cores = [core(CoreType::Armv7m)];
+
+        assert!(
+            options
+                .effective_skip_sections_by_default(&cores)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_caller_provided_list_is_authoritative() {
+        let options = ElfOptions {
+            skip_sections_by_default: vec![".keep_out".to_string()],
+            ..Default::default()
+        };
+        let cores = [core(CoreType::Avr)];
+
+        assert_eq!(
+            options.effective_skip_sections_by_default(&cores),
+            vec![".keep_out".to_string()]
+        );
+    }
 }
