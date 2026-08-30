@@ -383,6 +383,31 @@ impl Probe {
         )
     }
 
+    /// Attach to the chip without resetting it.
+    ///
+    /// This runs all the necessary protocol init routines, but leaves a
+    /// running target running. On AVR this opens the UPDI debug session on
+    /// the live part; the core keeps executing until it is halted.
+    ///
+    /// A session attached this way never learns whether the part is locked,
+    /// so only use this on parts known to be unlocked.
+    ///
+    /// The target is loaded from the builtin list of targets.
+    pub fn attach_without_reset(
+        self,
+        target: impl Into<TargetSelector>,
+        permissions: Permissions,
+    ) -> Result<Session, Error> {
+        let registry = Registry::from_builtin_families();
+        Session::new(
+            self,
+            target.into(),
+            AttachMethod::Running,
+            permissions,
+            &registry,
+        )
+    }
+
     /// Attach to a target without knowing what target you have at hand.
     /// This can be used for automatic device discovery or performing operations on an unspecified target.
     pub fn attach_to_unspecified(&mut self) -> Result<(), Error> {
@@ -1520,6 +1545,14 @@ pub enum AttachMethod {
     ///
     /// This is required on targets that can remap SWD pins or disable the SWD interface in sleep.
     UnderReset,
+    /// Attach to the target without resetting it.
+    ///
+    /// AVR targets support this over UPDI: the debug session opens on a
+    /// running part and leaves it running. The trade-off is that the lock
+    /// state is not learned, so this is only safe on a part known to be
+    /// unlocked. On targets without explicit support this behaves like
+    /// [`AttachMethod::Normal`].
+    Running,
 }
 
 #[cfg(test)]

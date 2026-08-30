@@ -168,9 +168,12 @@ impl<'probe> Avr<'probe> {
     /// Attaches to an AVR core over an open UPDI session.
     ///
     /// The session has to be in programming mode already, which is what
-    /// `Session` leaves it in. This switches it over to debugging, which sends
-    /// the on-chip debug key. The core keeps running, so a caller that wants it
-    /// stopped has to halt it.
+    /// `Session` leaves it in, or already debugging, which is what a
+    /// reset-free attach leaves it in. Switching over sends the on-chip debug
+    /// key and debug-resets the part, which releases the reset a programming
+    /// session asserted and leaves the core halted on the reset vector. A
+    /// session that was opened without a reset is left exactly as it was: the
+    /// core keeps running until someone halts it.
     ///
     /// The debug sequence is taken but not used. [`AvrDebugSequence`] has no
     /// hooks yet, and this signature is here so adding one does not change every

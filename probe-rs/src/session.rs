@@ -220,7 +220,7 @@ impl Session {
         // AVR is reached over UPDI, which is neither a DAP nor a JTAG scan chain,
         // so it needs its own path.
         if target.default_core().core_type.architecture() == Architecture::Avr {
-            return Self::attach_avr(probe, target, cores);
+            return Self::attach_avr(probe, target, attach_method, cores);
         }
 
         // Use ARM DAP path when the target connects via SWD/DAP: either ARM cores or RISC-V cores
@@ -446,10 +446,18 @@ impl Session {
     ///
     /// `EnterProgMode` is the only operation that is safe on a tool which has
     /// not talked to the target yet, so it comes first and the signature read
-    /// follows it.
+    /// follows it. It asserts `ASI_RESET_REQ`, and the first core attach
+    /// releases the part with a debug reset that leaves it halted on the reset
+    /// vector.
+    ///
+    /// [`AttachMethod::Running`] opens the debug session directly instead, on
+    /// a part that is already running, and leaves it running. That path never
+    /// learns the lock state, so it is only safe on a part known to be
+    /// unlocked.
     fn attach_avr(
         mut probe: Probe,
         target: Target,
+        attach_method: AttachMethod,
         cores: Vec<CombinedCoreState>,
     ) -> Result<Self, Error> {
         // The script tables split by part family, and the target description
@@ -466,6 +474,18 @@ impl Session {
                 "{} declares no AVR flash region, so flash access is not bounds-checked",
                 target.name
             ),
+        }
+        {
+            let mut interface = probe.try_get_avr_interface(&mut state)?;
+            match attach_method {
+                AttachMethod::Running => interface.attach_without_reset()?,
+                AttachMethod::Normal | AttachMethod::UnderReset => {
+                    interface.enter_programming_mode()?
+                }
+            }
+
+            let device_id = interface.device_id()?;
+            tracing::info!("Connected to an AVR with signature {device_id}");
         }
         {
             let mut interface = probe.try_get_avr_interface(&mut state)?;

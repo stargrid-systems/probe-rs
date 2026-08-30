@@ -695,11 +695,13 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// Switches the open programming session over to debugging.
     ///
     /// This sends the on-chip debug key and then lets the part out of reset, so
-    /// it leaves the core running. A caller that wants a halted core has to halt
-    /// it afterwards.
+    /// it leaves the core halted on the reset vector. A caller that wants a
+    /// running core has to resume it afterwards.
     ///
     /// It does nothing when the session is already a debug session, which is
-    /// what happens when a second core handle is taken from the same session.
+    /// what happens when a second core handle is taken from the same session,
+    /// or when the session was opened without a reset, which left the part
+    /// running in the first place.
     pub fn enter_debug_mode(&mut self) -> Result<(), AvrError> {
         if self.probe.state() == SessionState::Debugging {
             return Ok(());
