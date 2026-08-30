@@ -145,6 +145,12 @@ impl ArchitectureInterface {
         target: &'probe Target,
         combined_state: &'probe mut CombinedCoreState,
     ) -> Result<Core<'probe>, Error> {
+        // Record the attempt before the state is borrowed into the `Core`.
+        // A core that was never attached gets no teardown either, so a
+        // failure here, which already ran its side effects, keeps the
+        // teardown rather than skipping it.
+        combined_state.attached = true;
+
         match self {
             ArchitectureInterface::Arm(interface) => combined_state.attach_arm(target, interface),
             ArchitectureInterface::ArmWithRiscv {
@@ -683,6 +689,12 @@ impl Session {
     ) -> Result<R, Error> {
         let mut resume_state = vec![];
         for (core, _) in self.list_cores() {
+            // A core nobody attached to cannot be halted, and attaching it
+            // here would run its attach side effects for nothing.
+            if !self.cores[core].attached {
+                continue;
+            }
+
             let mut c = match self.core(core) {
                 Err(Error::CoreDisabled(_)) => continue,
                 other => other?,
@@ -1164,6 +1176,10 @@ impl Session {
     pub fn clear_all_hw_breakpoints(&mut self) -> Result<(), Error> {
         self.halted_access(|session| {
             { 0..session.cores.len() }.try_for_each(|core| {
+                if !session.cores[core].attached {
+                    return Ok(());
+                }
+
                 tracing::info!("Clearing breakpoints for core {core}");
 
                 match session.core(core) {
@@ -1219,12 +1235,21 @@ impl Drop for Session {
             );
         }
 
-        // Call any necessary deconfiguration/shutdown hooks.
-        if let Err(err) = { 0..self.cores.len() }.try_for_each(|core| match self.core(core) {
-            Ok(mut core) => core.debug_core_stop(),
-            Err(Error::CoreDisabled(_)) => Ok(()),
-            Err(err) => Err(err),
-        }) {
+        // Call any necessary deconfiguration/shutdown hooks. A core that was
+        // never attached gets no teardown either: deconfiguring it would
+        // attach it first, running side effects on hardware the user never
+        // touched through this session.
+        let attached_cores: Vec<usize> = (0..self.cores.len())
+            .filter(|core| self.cores[*core].attached)
+            .collect();
+        if let Err(err) = attached_cores
+            .into_iter()
+            .try_for_each(|core| match self.core(core) {
+                Ok(mut core) => core.debug_core_stop(),
+                Err(Error::CoreDisabled(_)) => Ok(()),
+                Err(err) => Err(err),
+            })
+        {
             tracing::warn!("Failed to deconfigure device during shutdown: {:?}", err);
         }
     }

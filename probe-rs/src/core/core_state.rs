@@ -21,6 +21,14 @@ pub(crate) struct CombinedCoreState {
     pub(crate) specific_state: SpecificCoreState,
 
     pub(crate) id: usize,
+
+    /// Whether a `Core` handle was ever created from this state.
+    ///
+    /// Teardown paths use this to avoid attaching a core the user never
+    /// touched. Attaching runs hardware side effects, such as sending the
+    /// on-chip debug key on AVR, which a session that only flashed or only
+    /// inspected another core should not trigger.
+    pub(crate) attached: bool,
 }
 
 impl CombinedCoreState {
