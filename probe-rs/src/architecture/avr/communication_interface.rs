@@ -28,6 +28,9 @@
 //! here.
 
 use std::fmt;
+use std::ops::Range;
+
+use probe_rs_target::MemoryRegion;
 
 use crate::architecture::avr::ocd;
 use crate::error::Error;
@@ -150,6 +153,84 @@ pub fn to_tool_flash_address(family: AvrFamily, address: u64) -> Result<u32, Avr
     Ok(tool as u32)
 }
 
+/// The address range of a part's flash, taken from its memory map.
+///
+/// probe-rs places flash below [`DATA_SPACE_OFFSET`] and the data space above
+/// it, so a non-alias NVM region that ends at or below the offset is the flash.
+/// The mapped flash window sits above the offset and is marked as an alias, so
+/// it is never mistaken for the real thing.
+///
+/// # Examples
+///
+/// ```
+/// use probe_rs::architecture::avr::communication_interface::{DATA_SPACE_OFFSET, flash_range};
+/// use probe_rs_target::{MemoryRegion, NvmRegion};
+///
+/// let region = |range: std::ops::Range<u64>, is_alias: bool| {
+///     MemoryRegion::Nvm(NvmRegion {
+///         name: None,
+///         range,
+///         cores: vec!["main".to_owned()],
+///         is_alias,
+///         access: None,
+///     })
+/// };
+///
+/// let map = [
+///     region(0x0..0x2_0000, false),
+///     region((DATA_SPACE_OFFSET + 0x8000)..(DATA_SPACE_OFFSET + 0x1_0000), true),
+/// ];
+///
+/// assert_eq!(flash_range(&map), Some(0x0..0x2_0000));
+/// ```
+pub fn flash_range(memory_map: &[MemoryRegion]) -> Option<Range<u64>> {
+    memory_map
+        .iter()
+        .filter_map(MemoryRegion::as_nvm_region)
+        .find(|region| !region.is_alias && region.range.end <= DATA_SPACE_OFFSET)
+        .map(|region| region.range.clone())
+}
+
+/// Checks that a data-space transfer of `len` bytes at `address` fits.
+///
+/// The whole transfer has to stay under [`MAX_DATA_ADDRESS`], because the
+/// blocks of a split transfer are computed from the length and an unchecked end
+/// would send the tool an address it cannot answer. Returns the chip address of
+/// the first byte.
+fn check_data_range(address: u64, len: usize) -> Result<u32, AvrError> {
+    let chip = to_chip_data_address(address)?;
+
+    let end = u64::from(chip)
+        .checked_add(len as u64)
+        .ok_or(AvrError::NotInDataSpace(address))?;
+
+    if end > MAX_DATA_ADDRESS + 1 {
+        return Err(AvrError::NotInDataSpace(address));
+    }
+
+    Ok(chip)
+}
+
+/// Checks that a flash transfer of `len` bytes at `address` fits in flash.
+///
+/// `flash_length` is what the target description declares. When it is unknown
+/// the access cannot be bounded and passes through.
+fn check_flash_range(flash_length: Option<u64>, address: u64, len: u64) -> Result<(), AvrError> {
+    let Some(flash_length) = flash_length else {
+        return Ok(());
+    };
+
+    let end = address
+        .checked_add(len)
+        .ok_or(AvrError::NotInFlash(address))?;
+
+    if end > flash_length {
+        return Err(AvrError::NotInFlash(address));
+    }
+
+    Ok(())
+}
+
 /// An error that happened while talking to an AVR target.
 #[derive(thiserror::Error, Debug, docsplay::Display)]
 pub enum AvrError {
@@ -261,10 +342,12 @@ impl fmt::Display for DeviceId {
 ///
 /// The caller owns this, the same way it owns the Xtensa and RISC-V interface
 /// state. It carries the choice of script table, which has to be made before
-/// the first script runs, and the identity once it has been read.
+/// the first script runs, the length of flash that bounds flash accesses, and
+/// the identity once it has been read.
 #[derive(Debug)]
 pub struct AvrDebugInterfaceState {
     family: AvrFamily,
+    flash_length: Option<u64>,
     speed_khz: Option<u32>,
     device_id: Option<DeviceId>,
 }
@@ -284,6 +367,7 @@ impl AvrDebugInterfaceState {
     pub fn new(family: AvrFamily) -> Self {
         Self {
             family,
+            flash_length: None,
             speed_khz: None,
             device_id: None,
         }
@@ -292,6 +376,19 @@ impl AvrDebugInterfaceState {
     /// The script table this interface runs.
     pub fn family(&self) -> AvrFamily {
         self.family
+    }
+
+    /// The size of the part's flash in bytes, if it is known.
+    pub fn flash_length(&self) -> Option<u64> {
+        self.flash_length
+    }
+
+    /// Records the size of the part's flash, in bytes.
+    ///
+    /// Flash reads and writes are rejected when they reach past this, so it
+    /// should be set before the first flash access.
+    pub fn set_flash_length(&mut self, flash_length: u64) {
+        self.flash_length = Some(flash_length);
     }
 
     /// The identity read from the part, if it has been read already.
@@ -451,17 +548,20 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// Reads the data space one byte at a time.
     ///
     /// `address` is a probe-rs address, so it is at or above
-    /// [`DATA_SPACE_OFFSET`].
+    /// [`DATA_SPACE_OFFSET`]. The whole transfer has to fit in the data space.
     pub fn read_data_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), AvrError> {
-        self.read(ScriptName::ReadMem8, to_chip_data_address(address)?, data)
+        let chip = check_data_range(address, data.len())?;
+
+        self.read(ScriptName::ReadMem8, chip, data)
     }
 
     /// Writes the data space one byte at a time.
     ///
-    /// Split into [`MAX_TRANSFER`] blocks. Flash is deliberately not split this
-    /// way, because a flash write erases whole pages and the caller aligns it.
+    /// Split into [`MAX_TRANSFER`] blocks. The whole transfer has to fit in the
+    /// data space. Flash is deliberately not split this way, because a flash
+    /// write erases whole pages and the caller aligns it.
     pub fn write_data_8(&mut self, address: u64, data: &[u8]) -> Result<(), AvrError> {
-        let chip = to_chip_data_address(address)?;
+        let chip = check_data_range(address, data.len())?;
 
         for (index, block) in data.chunks(MAX_TRANSFER).enumerate() {
             let offset = (index * MAX_TRANSFER) as u32;
@@ -477,9 +577,9 @@ impl<'probe> AvrCommunicationInterface<'probe> {
     /// linear across the whole device, so this also reaches the part of flash
     /// that is not mapped into the data space.
     ///
-    /// Any address and any length work here. The script underneath accepts
-    /// neither, so this widens the request out to whole words and hands back
-    /// the slice that was asked for.
+    /// Any address and any length that stay inside flash work here. The script
+    /// underneath checks neither end, so this bounds the transfer and widens
+    /// it out to whole words before handing back the slice that was asked for.
     ///
     /// # Why the request is widened
     ///
@@ -503,6 +603,9 @@ impl<'probe> AvrCommunicationInterface<'probe> {
         }
 
         let (start, skip, widened) = word_span(address, data.len());
+        // The widened span is what goes to the tool, so that is what is bounded.
+        check_flash_range(self.state.flash_length(), start, widened as u64)?;
+
         let tool_address = to_tool_flash_address(self.state.family, start)?;
 
         let mut words = vec![0; widened];
@@ -531,6 +634,8 @@ impl<'probe> AvrCommunicationInterface<'probe> {
                 length: data.len(),
             });
         }
+
+        check_flash_range(self.state.flash_length(), address, data.len() as u64)?;
 
         let tool_address = to_tool_flash_address(self.state.family, address)?;
 
@@ -756,7 +861,11 @@ fn check_breakpoint_unit(unit: usize) -> Result<u32, AvrError> {
 pub fn word_span(address: u64, len: usize) -> (u64, usize, usize) {
     let skip = usize::from(!address.is_multiple_of(2));
 
-    (address - skip as u64, skip, (skip + len).next_multiple_of(2))
+    (
+        address - skip as u64,
+        skip,
+        (skip + len).next_multiple_of(2),
+    )
 }
 
 /// Wraps a probe-specific error so this module does not name the probe driver.
@@ -818,7 +927,6 @@ impl AvrCommunicationInterface<'_> {
             AddressSpace::Data => self.write_data_8(address, data),
         }
     }
-
 }
 
 /// Memory access on an 8-bit Harvard machine.
@@ -1053,6 +1161,101 @@ mod tests {
         assert!(to_chip_data_address(too_high).is_err());
         assert!(to_chip_data_address(too_high - 1).is_ok());
         assert!(to_chip_data_address(DATA_SPACE_OFFSET + 0x1_0000).is_err());
+    }
+
+    /// The mapped flash window reaches the top of the data space, so a read or
+    /// write that starts inside it can still run past the top. A transfer that
+    /// crosses that line would send the tool an address it cannot answer.
+    #[test]
+    fn a_data_transfer_may_not_cross_the_top_of_the_data_space() {
+        // The last byte alone is fine.
+        assert_eq!(
+            check_data_range(DATA_SPACE_OFFSET + 0xFFFF, 1).unwrap(),
+            0xFFFF
+        );
+        // A transfer that fills the space right up to the top is fine too.
+        assert!(check_data_range(DATA_SPACE_OFFSET + 0x8000, 0x8000).is_ok());
+        assert!(check_data_range(DATA_SPACE_OFFSET + 0xFFFE, 2).is_ok());
+        // One byte more crosses the top.
+        assert!(check_data_range(DATA_SPACE_OFFSET + 0x8000, 0x8001).is_err());
+        // Two bytes from the last address cross it.
+        assert!(check_data_range(DATA_SPACE_OFFSET + 0xFFFF, 2).is_err());
+    }
+
+    /// A transfer that starts past the top is rejected whole, the same way a
+    /// single out-of-range address is.
+    #[test]
+    fn a_data_transfer_outside_the_data_space_is_rejected() {
+        let past = DATA_SPACE_OFFSET + MAX_DATA_ADDRESS + 1;
+
+        assert!(check_data_range(past, 1).is_err());
+        assert!(check_data_range(past, MAX_TRANSFER).is_err());
+    }
+
+    /// Flash is bounded by the length the target description declares, not by
+    /// the data space offset. The whole transfer has to fit, and a read checks
+    /// the widened span it actually asks the script for.
+    #[test]
+    fn a_flash_transfer_past_the_end_of_flash_is_rejected() {
+        let mut state = AvrDebugInterfaceState::new(AvrFamily::Dx);
+        // 128 KiB, as an AVR128DA64 has.
+        state.set_flash_length(0x2_0000);
+        let flash_length = state.flash_length();
+
+        // The last byte is reachable.
+        assert!(check_flash_range(flash_length, 0x1_FFFF, 1).is_ok());
+        // Reaching one byte past the end is not, and neither is starting there.
+        assert!(check_flash_range(flash_length, 0x1_FFFF, 2).is_err());
+        assert!(check_flash_range(flash_length, 0x2_0000, 1).is_err());
+        // An odd address widens a read back a byte and rounds it up, and that
+        // widened span is what has to fit.
+        let (start, _skip, widened) = word_span(0x1_FFFF, 2);
+        assert!(check_flash_range(flash_length, start, widened as u64).is_err());
+        // A read of the whole flash fits.
+        assert!(check_flash_range(flash_length, 0, 0x2_0000).is_ok());
+    }
+
+    /// Without a declared flash length nothing can be bounded, so the access
+    /// passes through and keeps the behaviour it had before.
+    #[test]
+    fn an_undeclared_flash_length_bounds_nothing() {
+        let state = AvrDebugInterfaceState::new(AvrFamily::Dx);
+
+        assert_eq!(state.flash_length(), None);
+        assert!(check_flash_range(state.flash_length(), 0x2_0000, 0x1_0000).is_ok());
+    }
+
+    /// The real flash ends at the data space offset and the mapped window sits
+    /// above it as an alias, so the region picked here is the one the flash
+    /// scripts can reach.
+    #[test]
+    fn the_flash_region_is_the_non_alias_region_below_the_offset() {
+        use probe_rs_target::{MemoryRegion, NvmRegion};
+
+        let region = |range: std::ops::Range<u64>, is_alias: bool| {
+            MemoryRegion::Nvm(NvmRegion {
+                name: None,
+                range,
+                cores: vec!["main".to_owned()],
+                is_alias,
+                access: None,
+            })
+        };
+
+        // As an AVR128DA64 declares it.
+        let map = [
+            region(0x0..0x2_0000, false),
+            region(
+                (DATA_SPACE_OFFSET + 0x8000)..(DATA_SPACE_OFFSET + 0x1_0000),
+                true,
+            ),
+        ];
+
+        assert_eq!(flash_range(&map), Some(0x0..0x2_0000));
+
+        // An aliased region below the offset is not the flash either.
+        let map = [region(0x0..0x2_0000, true)];
+        assert_eq!(flash_range(&map), None);
     }
 
     /// Routing is the whole of the Harvard split, so pin where the boundary is

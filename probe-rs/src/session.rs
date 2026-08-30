@@ -10,7 +10,7 @@ use crate::{
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
         avr::communication_interface::{
-            AvrCommunicationInterface, AvrDebugInterfaceState, AvrError,
+            AvrCommunicationInterface, AvrDebugInterfaceState, AvrError, flash_range,
         },
         riscv::{
             communication_interface::{
@@ -457,6 +457,13 @@ impl Session {
         probe.attach_to_unspecified()?;
 
         let mut state = AvrDebugInterfaceState::new(family);
+        match flash_range(&target.memory_map) {
+            Some(range) => state.set_flash_length(range.end - range.start),
+            None => tracing::warn!(
+                "{} declares no AVR flash region, so flash access is not bounds-checked",
+                target.name
+            ),
+        }
         {
             let mut interface = probe.try_get_avr_interface(&mut state)?;
             interface.enter_programming_mode()?;
