@@ -747,6 +747,7 @@ mod tests {
         },
         cortex_m::{CORTEX_M_CORE_REGISTERS, CORTEX_M_WITH_FP_CORE_REGISTERS},
     };
+    use crate::architecture::avr::registers::AVR_CORE_REGISTERS;
     use crate::architecture::riscv::{
         registers::{RISCV_CORE_REGISTERS, RISCV_WITH_FP_CORE_REGISTERS},
         registers64::{RISCV64_CORE_REGISTERS, RISCV64_WITH_FP_CORE_REGISTERS},
@@ -833,6 +834,73 @@ mod tests {
                 if V8M_SECURITY_REGISTERS.contains(&register.name()) {
                     // The two Main Extension registers push these two places further down.
                     assert_eq!(register.dwarf_id, positional_dwarf_id(index - 2));
+                }
+            }
+        }
+    }
+    /// No two registers in a file may claim the same DWARF number.
+    ///
+    /// A collision silently breaks register lookup by DWARF number, because
+    /// the lookup takes the first match. The Armv8-M security registers are
+    /// the one allowed exception: inside the Main-extension files their base
+    /// extension numbers collide with `MSPLIM_NS` and `PSPLIM_NS`, and no DWARF
+    /// information refers to them. Any other collision, including a new one
+    /// among the security registers, fails here.
+    #[test]
+    fn dwarf_ids_are_unique_within_a_register_file() {
+        let files: &[(&str, &CoreRegisters, &[&str])] = &[
+            ("CORTEX_M", &CORTEX_M_CORE_REGISTERS, &[]),
+            ("CORTEX_M_WITH_FP", &CORTEX_M_WITH_FP_CORE_REGISTERS, &[]),
+            ("AARCH32", &AARCH32_CORE_REGISTERS, &[]),
+            (
+                "AARCH32_WITH_FP_16",
+                &AARCH32_WITH_FP_16_CORE_REGISTERS,
+                &[],
+            ),
+            (
+                "AARCH32_WITH_FP_32",
+                &AARCH32_WITH_FP_32_CORE_REGISTERS,
+                &[],
+            ),
+            ("AARCH64", &AARCH64_CORE_REGISTERS, &[]),
+            ("V8M_BASE_SEC", &V8M_BASE_SEC_REGISTERS, &[]),
+            ("V8M_BASE_SEC_FP", &V8M_BASE_SEC_FP_REGISTERS, &[]),
+            ("V8M_MAIN", &V8M_MAIN_REGISTERS, &[]),
+            ("V8M_MAIN_FP", &V8M_MAIN_FP_REGISTERS, &[]),
+            (
+                "V8M_MAIN_SEC",
+                &V8M_MAIN_SEC_REGISTERS,
+                V8M_SECURITY_REGISTERS,
+            ),
+            (
+                "V8M_MAIN_SEC_FP",
+                &V8M_MAIN_SEC_FP_REGISTERS,
+                V8M_SECURITY_REGISTERS,
+            ),
+            ("RISCV", &RISCV_CORE_REGISTERS, &[]),
+            ("RISCV_WITH_FP", &RISCV_WITH_FP_CORE_REGISTERS, &[]),
+            ("RISCV64", &RISCV64_CORE_REGISTERS, &[]),
+            ("RISCV64_WITH_FP", &RISCV64_WITH_FP_CORE_REGISTERS, &[]),
+            ("XTENSA", &XTENSA_CORE_REGISTERS, &[]),
+            ("AVR", &AVR_CORE_REGISTERS, &[]),
+        ];
+
+        for (name, registers, skip) in files {
+            let mut seen: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
+
+            for register in registers.core_registers() {
+                if skip.contains(&register.name()) {
+                    continue;
+                }
+                let Some(dwarf_id) = register.dwarf_id else {
+                    continue;
+                };
+
+                if let Some(previous) = seen.insert(dwarf_id, register.name()) {
+                    panic!(
+                        "{name}: {previous} and {} both claim DWARF number {dwarf_id}",
+                        register.name()
+                    );
                 }
             }
         }
